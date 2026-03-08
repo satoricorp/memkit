@@ -5,6 +5,9 @@
     "local:build": "./scripts/local-build.sh",
     "local:start": "./scripts/local-start.sh",
     "local:stop": "./scripts/local-stop.sh",
-    "local:status": "./scripts/local-status.sh"
+    "local:status": "./scripts/local-status.sh",
+    "daemon:start": "./scripts/daemon-start.sh",
+    "daemon:stop": "./scripts/daemon-stop.sh",
+    "daemon:status": "./scripts/daemon-status.sh"
   }
 }

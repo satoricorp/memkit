@@ -18,7 +18,11 @@ check_pid_file() {
   fi
 }
 
-check_pid_file "${RUN_DIR}/falkordb.pid" "falkordb"
+if [ -x "${SCRIPT_DIR}/falkor-runtime.sh" ]; then
+  "${SCRIPT_DIR}/falkor-runtime.sh" status
+else
+  check_pid_file "${RUN_DIR}/falkordb.pid" "falkordb"
+fi
 check_pid_file "${RUN_DIR}/satori-api.pid" "satori-api"
 
 if command -v curl >/dev/null 2>&1; then

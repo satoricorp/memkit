@@ -1,0 +1,19 @@
+{
+  "version": "falkordb-bin-1.4.1",
+  "platforms": {
+    "darwin-arm64": {
+      "url": "https://files.pythonhosted.org/packages/91/d7/71243f104105e948e3baa87bd66f239f272d3ca4d2636636c8d7c24ddd18/falkordb_bin-1.4.1-cp313-cp313-macosx_11_0_arm64.whl",
+      "sha256": "a1ce349fcc868bec8144ce9d63e1ff00bd5b6f45a383c7774f1d9e3417aad537",
+      "redis_member": "falkordb_bin-1.4.1.data/purelib/falkordb_bin/bin/redis-server",
+      "module_member": "falkordb_bin-1.4.1.data/purelib/falkordb_bin/bin/falkordb.dylib",
+      "module_name": "falkordb.dylib"
+    },
+    "linux-x86_64": {
+      "url": "https://files.pythonhosted.org/packages/f0/90/61352691ecade84ec271f1f4571932092006f1d3748cfcb74ddbdb89b1a6/falkordb_bin-1.4.1-cp313-cp313-manylinux_2_17_x86_64.whl",
+      "sha256": "f360edd128f4e9d7438ec18ee4012ca9ba799778b3c928d68bfd8f47f85dc406",
+      "redis_member": "falkordb_bin-1.4.1.data/purelib/falkordb_bin/bin/redis-server",
+      "module_member": "falkordb_bin-1.4.1.data/purelib/falkordb_bin/bin/falkordb.so",
+      "module_name": "falkordb.so"
+    }
+  }
+}

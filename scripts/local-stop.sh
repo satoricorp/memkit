@@ -20,4 +20,8 @@ stop_pid_file() {
 }
 
 stop_pid_file "${RUN_DIR}/satori-api.pid" "satori-api"
-stop_pid_file "${RUN_DIR}/falkordb.pid" "falkordb"
+if [ -x "${SCRIPT_DIR}/falkor-runtime.sh" ]; then
+  "${SCRIPT_DIR}/falkor-runtime.sh" stop
+else
+  stop_pid_file "${RUN_DIR}/falkordb.pid" "falkordb"
+fi

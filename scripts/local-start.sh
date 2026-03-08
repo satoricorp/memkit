@@ -20,44 +20,8 @@ if [ ! -x "${ROOT_DIR}/target/release/satori" ]; then
   "${SCRIPT_DIR}/local-build.sh"
 fi
 
-if [ -f "${RUN_DIR}/falkordb.pid" ] && kill -0 "$(cat "${RUN_DIR}/falkordb.pid")" 2>/dev/null; then
-  echo "falkordb already running"
-else
-  rm -f "$SOCKET_PATH"
-
-  if command -v falkordb-server >/dev/null 2>&1; then
-    nohup falkordb-server \
-      --unixsocket "$SOCKET_PATH" \
-      --unixsocketperm 777 \
-      --save 60 1 \
-      --dir "$GRAPH_PATH" \
-      > "${RUN_DIR}/falkordb.log" 2>&1 &
-  elif command -v redis-server >/dev/null 2>&1 && [ -n "${FALKORDB_MODULE:-}" ]; then
-    nohup redis-server \
-      --loadmodule "${FALKORDB_MODULE}" \
-      --unixsocket "$SOCKET_PATH" \
-      --unixsocketperm 777 \
-      --save 60 1 \
-      --dir "$GRAPH_PATH" \
-      > "${RUN_DIR}/falkordb.log" 2>&1 &
-  else
-    echo "could not start FalkorDB. Install falkordb-server or set FALKORDB_MODULE with redis-server." >&2
-    exit 1
-  fi
-
-  echo $! > "${RUN_DIR}/falkordb.pid"
-fi
-
-i=0
-while [ ! -S "$SOCKET_PATH" ] && [ "$i" -lt 20 ]; do
-  sleep 0.5
-  i=$((i + 1))
-done
-
-if [ ! -S "$SOCKET_PATH" ]; then
-  echo "timed out waiting for FalkorDB socket at $SOCKET_PATH" >&2
-  exit 1
-fi
+"${SCRIPT_DIR}/falkor-ensure.sh"
+FALKORDB_SOCKET="$SOCKET_PATH" GRAPH_PATH="$GRAPH_PATH" "${SCRIPT_DIR}/falkor-runtime.sh" start
 
 if [ -f "${RUN_DIR}/satori-api.pid" ] && kill -0 "$(cat "${RUN_DIR}/satori-api.pid")" 2>/dev/null; then
   echo "satori api already running"
@@ -68,7 +32,7 @@ else
     API_PORT="$API_PORT" \
     AUTH_SECRET="$AUTH_SECRET" \
     "${ROOT_DIR}/target/release/satori" \
-    serve \
+    --headless-serve \
     --pack "$PACK_PATH" \
     --host "$API_HOST" \
     --port "$API_PORT" \
