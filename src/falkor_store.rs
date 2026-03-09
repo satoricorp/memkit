@@ -1,6 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use redis::{ConnectionLike, Value};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
@@ -92,17 +92,41 @@ fn value_to_json(v: &Value) -> JsonValue {
     }
 }
 
+fn compact_cell_to_json(v: &Value) -> JsonValue {
+    match v {
+        Value::Array(parts) if parts.len() == 2 => match &parts[0] {
+            Value::Int(_) => value_to_json(&parts[1]),
+            _ => value_to_json(v),
+        },
+        _ => value_to_json(v),
+    }
+}
+
 fn rows_from_compact(value: &Value) -> Vec<Vec<JsonValue>> {
     let Value::Array(top) = value else {
         return Vec::new();
     };
+    if top.is_empty() {
+        return Vec::new();
+    }
+    if let Some(Value::Array(data_rows)) = top.get(1) {
+        let mut rows = Vec::new();
+        for row in data_rows {
+            if let Value::Array(cols) = row {
+                rows.push(cols.iter().map(compact_cell_to_json).collect());
+            }
+        }
+        if !rows.is_empty() {
+            return rows;
+        }
+    }
     if top.len() < 3 {
         return Vec::new();
     }
     let mut rows = Vec::new();
     for row in &top[1..top.len().saturating_sub(1)] {
         if let Value::Array(cols) = row {
-            rows.push(cols.iter().map(value_to_json).collect());
+            rows.push(cols.iter().map(compact_cell_to_json).collect());
         }
     }
     rows
@@ -242,7 +266,7 @@ pub fn query_chunks(
             content,
             start_offset: None,
             end_offset: None,
-            source: "falkor".to_string(),
+            source: "graph".to_string(),
             group_key: None,
         });
     }
@@ -292,14 +316,43 @@ pub fn graph_subgraph(
             limit.max(1)
         );
         let raw = graph_query_raw(&mut con, graph_name, &lookup)?;
-        rows_from_compact(&raw)
+        let mut ids = rows_from_compact(&raw)
             .into_iter()
             .filter_map(|row| {
                 row.first()
                     .and_then(JsonValue::as_str)
                     .map(ToOwned::to_owned)
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            let chunk_where = terms
+                .iter()
+                .map(|t| {
+                    format!(
+                        "toLower(c.content) CONTAINS '{v}' OR toLower(c.file_path) CONTAINS '{v}'",
+                        v = escape_cypher(t)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let chunk_lookup = format!(
+                "MATCH (c:Chunk) \
+                 WHERE {chunk_where} \
+                 RETURN c.id \
+                 LIMIT {}",
+                limit.max(1)
+            );
+            let raw_chunks = graph_query_raw(&mut con, graph_name, &chunk_lookup)?;
+            ids = rows_from_compact(&raw_chunks)
+                .into_iter()
+                .filter_map(|row| {
+                    row.first()
+                        .and_then(JsonValue::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .collect::<Vec<_>>();
+        }
+        ids
     };
 
     if chunk_ids.is_empty() {
@@ -311,6 +364,17 @@ pub fn graph_subgraph(
         .map(|id| format!("'{}'", escape_cypher(id)))
         .collect::<Vec<_>>()
         .join(",");
+    let seed_cypher = format!(
+        "MATCH (c:Chunk) \
+         WHERE c.id IN [{}] \
+         RETURN c.id, c.file_path, c.chunk_index \
+         LIMIT {}",
+        ids_list,
+        limit.max(1) * 4
+    );
+    let seed_raw = graph_query_raw(&mut con, graph_name, &seed_cypher)?;
+    let seed_rows = rows_from_compact(&seed_raw);
+
     let cypher = format!(
         "MATCH (c:Chunk)-[r*1..{}]-(n) \
          WHERE c.id IN [{}] \
@@ -324,7 +388,21 @@ pub fn graph_subgraph(
     let rows = rows_from_compact(&raw);
 
     let mut nodes = serde_json::Map::new();
-    let mut edges = Vec::new();
+    let mut edge_counts: HashMap<(String, String, String), usize> = HashMap::new();
+    for row in seed_rows {
+        if row.len() < 3 {
+            continue;
+        }
+        let c_id = row[0].as_str().unwrap_or_default().to_string();
+        let c_path = row[1].as_str().unwrap_or_default().to_string();
+        let c_idx = row[2].as_i64().unwrap_or(0);
+        if !c_id.is_empty() {
+            nodes.insert(
+                c_id.clone(),
+                json!({"id": c_id, "label": format!("{c_path}:{c_idx}"), "kind": "Chunk"}),
+            );
+        }
+    }
     for row in rows {
         if row.len() < 5 {
             continue;
@@ -345,9 +423,28 @@ pub fn graph_subgraph(
                 n_name.clone(),
                 json!({"id": n_name, "label": n_name, "kind": "Entity"}),
             );
-            edges.push(json!({"source": c_id, "target": row[3], "kind": "related"}));
+            if !c_id.is_empty() {
+                let key = (c_id, n_name, "related".to_string());
+                *edge_counts.entry(key).or_insert(0) += 1;
+            }
         }
     }
+
+    let mut edges = edge_counts
+        .into_iter()
+        .map(|((source, target, kind), count)| {
+            json!({"source": source, "target": target, "kind": kind, "count": count})
+        })
+        .collect::<Vec<_>>();
+    edges.sort_by(|a, b| {
+        let a_source = a.get("source").and_then(JsonValue::as_str).unwrap_or_default();
+        let b_source = b.get("source").and_then(JsonValue::as_str).unwrap_or_default();
+        let a_target = a.get("target").and_then(JsonValue::as_str).unwrap_or_default();
+        let b_target = b.get("target").and_then(JsonValue::as_str).unwrap_or_default();
+        a_source
+            .cmp(b_source)
+            .then_with(|| a_target.cmp(b_target))
+    });
 
     Ok(json!({
         "nodes": nodes.into_values().collect::<Vec<_>>(),
@@ -355,9 +452,3 @@ pub fn graph_subgraph(
     }))
 }
 
-pub fn ensure_graph_available(socket_path: &str, graph_name: &str) -> Result<()> {
-    let mut con = connect_unix_socket(socket_path)?;
-    graph_query_raw(&mut con, graph_name, "RETURN 1")
-        .map(|_| ())
-        .map_err(|e| anyhow!("failed to verify graph availability: {e}"))
-}
