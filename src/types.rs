@@ -79,7 +79,7 @@ pub struct QueryHit {
 }
 
 fn default_query_source() -> String {
-    "lancedb".to_string()
+    "vector".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -3,7 +3,10 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use owo_colors::OwoColorize;
 use serde_json::{Value, json};
+
+use crate::term;
 
 pub struct DaemonConfig {
     pub host: String,
@@ -30,6 +33,7 @@ pub struct QueryArgs {
     pub query: String,
     pub mode: String,
     pub top_k: usize,
+    pub raw: bool,
 }
 
 fn http_client() -> Result<reqwest::Client> {
@@ -142,7 +146,8 @@ pub async fn query(cfg: &DaemonConfig, args: &QueryArgs) -> Result<Value> {
         .json(&json!({
             "query": args.query,
             "mode": args.mode,
-            "top_k": args.top_k
+            "top_k": args.top_k,
+            "raw": args.raw
         }))
         .send()
         .await?;
@@ -248,6 +253,34 @@ pub async fn ontology_show(cfg: &DaemonConfig, source: &str) -> Result<Value> {
         return Err(anyhow!("ontology show failed: {}", body));
     }
     Ok(serde_json::from_str(&body)?)
+}
+
+pub async fn graph_show(cfg: &DaemonConfig) -> Result<()> {
+    let url = format!("{}/graph/view", cfg.base_url());
+    opener::open(url).context("failed to open graph view in browser")?;
+    Ok(())
+}
+
+pub async fn pack(cfg: &DaemonConfig) -> Result<()> {
+    let data = status(cfg).await?;
+    let pack_path = data
+        .get("pack_path")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let indexed = data.get("indexed").and_then(Value::as_bool).unwrap_or(false);
+    let status_str = if indexed { "indexed" } else { "not indexed" };
+    if term::color_stdout() {
+        println!("{} {}", "pack:".dimmed(), pack_path.bold());
+        if indexed {
+            println!("{} {}", "status:".dimmed(), "indexed".green());
+        } else {
+            println!("{} {}", "status:".dimmed(), "not indexed".yellow());
+        }
+    } else {
+        println!("pack: {}", pack_path);
+        println!("status: {}", status_str);
+    }
+    Ok(())
 }
 
 pub async fn jobs_list(cfg: &DaemonConfig) -> Result<Value> {

@@ -11,6 +11,7 @@ mod pack;
 mod query;
 mod query_synth;
 mod server;
+mod tui;
 mod types;
 
 use std::env;
@@ -19,6 +20,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Result, anyhow};
+use colored_json::to_colored_json_auto;
+use owo_colors::OwoColorize;
 
 use crate::cli_client::{DaemonConfig, QueryArgs};
 use crate::indexer::run_index;
@@ -34,10 +37,13 @@ struct HeadlessServeConfig {
 enum CliCommand {
     Status,
     Index,
+    GraphShow,
+    Pack,
     Query {
         query: String,
         mode: String,
         top_k: usize,
+        raw: bool,
     },
     SourcesList,
     SourcesAdd {
@@ -59,6 +65,7 @@ enum CliCommand {
         out: Option<String>,
     },
     Help,
+    Tui,
 }
 
 fn parse_headless_serve(args: &[String]) -> Result<Option<HeadlessServeConfig>> {
@@ -123,15 +130,24 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
     match args[0].as_str() {
         "status" => Ok(CliCommand::Status),
         "index" => Ok(CliCommand::Index),
+        "graph" => {
+            if args.get(1).map(|s| s.as_str()) == Some("show") {
+                Ok(CliCommand::GraphShow)
+            } else {
+                Err(anyhow!("usage: satori graph show"))
+            }
+        }
+        "pack" => Ok(CliCommand::Pack),
         "query" => {
             if args.len() < 2 {
                 return Err(anyhow!(
-                    "usage: satori query <text> [--mode hybrid|vector] [--top-k N]"
+                    "usage: satori query <text> [--mode hybrid|vector] [--top-k N] [--raw]"
                 ));
             }
             let query = args[1].clone();
             let mut mode = "hybrid".to_string();
             let mut top_k = 8usize;
+            let mut raw = false;
             let mut i = 2usize;
             while i < args.len() {
                 match args[i].as_str() {
@@ -151,11 +167,12 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
                             .parse::<usize>()
                             .map_err(|_| anyhow!("invalid --top-k value: {}", v))?;
                     }
+                    "--raw" => raw = true,
                     other => return Err(anyhow!("unsupported query argument: {}", other)),
                 }
                 i += 1;
             }
-            Ok(CliCommand::Query { query, mode, top_k })
+            Ok(CliCommand::Query { query, mode, top_k, raw })
         }
         "sources" => {
             if args.len() < 2 {
@@ -244,6 +261,7 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
                 )),
             }
         }
+        "tui" => Ok(CliCommand::Tui),
         "help" | "--help" | "-h" => Ok(CliCommand::Help),
         other => Err(anyhow!(
             "unknown command: {}. run `satori help` for usage",
@@ -253,21 +271,44 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
 }
 
 fn print_help() {
-    println!("satori command-first CLI");
+    let color = crate::term::color_stdout();
+    let title = if color {
+        "satori command-first CLI".bold().cyan().to_string()
+    } else {
+        "satori command-first CLI".to_string()
+    };
+    println!("{}", title);
     println!();
-    println!("Usage:");
-    println!("  satori status");
-    println!("  satori query <text> [--mode hybrid|vector] [--top-k N]");
-    println!("  satori index");
-    println!("  satori sources list");
-    println!("  satori sources add <path>");
-    println!("  satori sources remove <path>");
-    println!("  satori jobs list");
-    println!("  satori jobs status <job-id>");
-    println!("  satori ontology list");
-    println!("  satori ontology show --source <path>");
-    println!("  satori ontology export --source <path> [--out <file>]");
-    println!("  satori --headless-serve --pack <path> [--host <host> --port <port>]");
+    let usage = if color {
+        "Usage:".dimmed().to_string()
+    } else {
+        "Usage:".to_string()
+    };
+    println!("{}", usage);
+    let commands = [
+        "  satori status",
+        "  satori pack",
+        "  satori graph show",
+        "  satori query <text> [--mode hybrid|vector] [--top-k N] [--raw]",
+        "  satori index",
+        "  satori sources list",
+        "  satori sources add <path>",
+        "  satori sources remove <path>",
+        "  satori jobs list",
+        "  satori jobs status <job-id>",
+        "  satori ontology list",
+        "  satori ontology show --source <path>",
+        "  satori ontology export --source <path> [--out <file>]",
+        "  satori tui",
+        "  satori --headless-serve --pack <path> [--host <host> --port <port>]",
+    ];
+    for cmd in commands {
+        if color {
+            println!("{}", cmd.cyan());
+        } else {
+            println!("{}", cmd);
+        }
+    }
 }
 
 #[tokio::main]
@@ -280,14 +321,56 @@ async fn main() -> Result<()> {
 
     match parse_cli_command(&args)? {
         CliCommand::Help => print_help(),
+        CliCommand::Tui => {
+            tui::app::run_tui().await?;
+            return Ok(());
+        }
         cmd => {
             let cfg = DaemonConfig::from_env();
             cli_client::ensure_daemon(&cfg).await?;
             let out = match cmd {
                 CliCommand::Status => cli_client::status(&cfg).await?,
                 CliCommand::Index => cli_client::index(&cfg).await?,
-                CliCommand::Query { query, mode, top_k } => {
-                    cli_client::query(&cfg, &QueryArgs { query, mode, top_k }).await?
+                CliCommand::GraphShow => {
+                    cli_client::graph_show(&cfg).await?;
+                    return Ok(());
+                }
+                CliCommand::Pack => {
+                    cli_client::pack(&cfg).await?;
+                    return Ok(());
+                }
+                CliCommand::Query { query, mode, top_k, raw } => {
+                    let out = cli_client::query(&cfg, &QueryArgs { query, mode, top_k, raw }).await?;
+                    if !raw {
+                        if let (Some(answer), Some(sources)) = (
+                            out.get("answer").and_then(serde_json::Value::as_str),
+                            out.get("sources").and_then(serde_json::Value::as_array),
+                        ) {
+                            if let Some(provider) = out.get("provider").and_then(serde_json::Value::as_str) {
+                                println!("[{}]", provider);
+                                println!();
+                            }
+                            println!("{}", answer);
+                            if !sources.is_empty() {
+                                println!();
+                                println!("Sources:");
+                                for s in sources.iter().take(3) {
+                                    let path = s
+                                        .get("path")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or("?");
+                                    let score = s
+                                        .get("score")
+                                        .and_then(serde_json::Value::as_f64)
+                                        .unwrap_or(0.0);
+                                    let pct = (score.min(1.0) * 100.0) as u32;
+                                    println!("  {} ({}%)", path, pct);
+                                }
+                            }
+                            return Ok(());
+                        }
+                    }
+                    out
                 }
                 CliCommand::SourcesList => cli_client::sources_list(&cfg).await?,
                 CliCommand::SourcesAdd { path } => cli_client::sources_add(&cfg, &path).await?,
@@ -320,9 +403,15 @@ async fn main() -> Result<()> {
                         "artifact": artifact
                     })
                 }
-                CliCommand::Help => unreachable!(),
+                CliCommand::Help | CliCommand::Tui => unreachable!(),
             };
-            println!("{}", serde_json::to_string_pretty(&out)?);
+            let json_str = serde_json::to_string_pretty(&out)?;
+            let output = if crate::term::color_stdout() {
+                to_colored_json_auto(&out).unwrap_or(json_str.clone())
+            } else {
+                json_str
+            };
+            println!("{}", output);
         }
     }
 
@@ -336,21 +425,47 @@ pub(crate) async fn serve_with_startup(pack: PathBuf, host: String, port: u16) -
         .iter()
         .map(|s| PathBuf::from(&s.root_path))
         .collect();
+    let color = crate::term::color_stdout();
     if !sources.is_empty() {
         let (scanned, updated, chunks) = run_index(&pack, &sources)?;
-        println!(
-            "startup index complete: scanned={} updated_files={} chunks={}",
-            scanned, updated, chunks
-        );
+        if color {
+            println!(
+                "{} scanned={} updated_files={} chunks={}",
+                "startup index complete:".green(),
+                scanned.to_string().cyan(),
+                updated.to_string().cyan(),
+                chunks.to_string().cyan()
+            );
+        } else {
+            println!(
+                "startup index complete: scanned={} updated_files={} chunks={}",
+                scanned, updated, chunks
+            );
+        }
     } else {
-        println!("startup index skipped: no sources configured in manifest");
+        if color {
+            println!("{}", "startup index skipped: no sources configured in manifest".yellow());
+        } else {
+            println!("startup index skipped: no sources configured in manifest");
+        }
     }
     let port = env::var("API_PORT")
         .ok()
         .and_then(|p| u16::from_str(&p).ok())
         .unwrap_or(port);
     let falkordb_socket = env::var("FALKORDB_SOCKET").ok();
-    println!("serving pack {} on {}:{}", pack.display(), host, port);
+    if color {
+        println!(
+            "{} {} {} {}:{}",
+            "serving pack".cyan(),
+            pack.display().to_string().bold(),
+            "on".cyan(),
+            host.cyan(),
+            port.to_string().cyan()
+        );
+    } else {
+        println!("serving pack {} on {}:{}", pack.display(), host, port);
+    }
     run_server(pack, host, port, falkordb_socket).await?;
     Ok(())
 }
