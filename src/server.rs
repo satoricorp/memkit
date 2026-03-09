@@ -18,8 +18,9 @@ use crate::falkor_store::{
 };
 use crate::indexer::run_index;
 use crate::ontology::OntologyEngine;
-use crate::pack::{load_manifest, save_manifest};
+use crate::pack::{load_index, load_manifest, save_manifest};
 use crate::query::run_query;
+use crate::query_synth::synthesize_answer;
 use crate::types::SourceConfig;
 
 #[derive(Clone)]
@@ -99,6 +100,8 @@ struct QueryRequest {
     mode: String,
     #[serde(default = "default_top_k")]
     top_k: usize,
+    #[serde(default)]
+    raw: bool,
 }
 
 #[derive(Deserialize)]
@@ -211,6 +214,9 @@ fn can_connect_to_socket(_path: &str) -> bool {
 
 async fn status(State(state): State<AppState>) -> Json<Value> {
     let manifest = load_manifest(&state.pack).ok();
+    let indexed = load_index(&state.pack)
+        .map(|idx| !idx.docs.is_empty())
+        .unwrap_or(false);
     let (active_job, last_job, queued_jobs) = {
         let jobs = state.jobs.lock().await;
         let active = jobs
@@ -228,6 +234,7 @@ async fn status(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "pack_path": state.pack.display().to_string(),
+        "indexed": indexed,
         "sources": manifest.map(|m| m.sources).unwrap_or_default(),
         "jobs": {
             "active": active_job,
@@ -357,7 +364,42 @@ async fn query(
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     match run_query(&state.pack, &req.query, &req.mode, req.top_k) {
-        Ok(resp) => Ok(Json(json!(resp))),
+        Ok(resp) => {
+            if req.raw {
+                Ok(Json(json!(resp)))
+            } else {
+                match synthesize_answer(&req.query, &resp) {
+                    Ok((answer, provider)) => {
+                        let mut by_path: std::collections::HashMap<String, f32> =
+                            std::collections::HashMap::new();
+                        for h in &resp.results {
+                            by_path
+                                .entry(h.file_path.clone())
+                                .and_modify(|s| *s = (*s).max(h.score))
+                                .or_insert(h.score);
+                        }
+                        let mut sources: Vec<_> = by_path
+                            .into_iter()
+                            .map(|(path, score)| json!({ "path": path, "score": score }))
+                            .collect();
+                        sources.sort_by(|a, b| {
+                            let sa = a.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let sb = b.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        Ok(Json(json!({
+                            "answer": answer,
+                            "sources": sources,
+                            "provider": provider.label()
+                        })))
+                    }
+                    Err(e) => Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error":{"code":"SYNTHESIS_FAILED","message":e.to_string()}})),
+                    )),
+                }
+            }
+        }
         Err(e) => Err((
             StatusCode::BAD_REQUEST,
             Json(json!({"error":{"code":"QUERY_FAILED","message":e.to_string()}})),

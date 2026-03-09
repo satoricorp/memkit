@@ -9,6 +9,7 @@ mod ontology_candle;
 mod ontology_llama;
 mod pack;
 mod query;
+mod query_synth;
 mod server;
 mod types;
 
