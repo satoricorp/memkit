@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -11,24 +11,8 @@ use crate::falkor_store::{
 use crate::lancedb_store::hybrid_query;
 use crate::pack::load_index;
 use crate::pack::load_manifest;
+use crate::rerank::{try_create_reranker, DEFAULT_RERANKER_MODEL};
 use crate::types::{QueryGroup, QueryHit, QueryResponse, QueryTimings};
-
-fn tokenize(text: &str) -> HashSet<String> {
-    text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-fn lexical_score(query: &HashSet<String>, content: &str) -> f32 {
-    if query.is_empty() {
-        return 0.0;
-    }
-    let doc = tokenize(content);
-    let overlap = query.intersection(&doc).count() as f32;
-    overlap / query.len() as f32
-}
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if a.is_empty() || b.is_empty() || a.len() != b.len() {
@@ -49,17 +33,18 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+const RERANK_LIMIT: usize = 50;
+
 pub fn run_query(
     pack_dir: &Path,
     q: &str,
-    mode: &str,
     top_k: usize,
+    use_reranker: bool,
     graph_name_override: Option<&str>,
 ) -> Result<QueryResponse> {
     let total_start = Instant::now();
     let manifest = load_manifest(pack_dir)?;
     let index = load_index(pack_dir)?;
-    let q_tokens = tokenize(q);
 
     let embed_start = Instant::now();
     let mut provider = provider_from_name(
@@ -121,22 +106,14 @@ pub fn run_query(
 
     let rerank_start = Instant::now();
     let index_docs = index.docs;
-    let doc_by_id: HashMap<String, _> =
-        index_docs.iter().map(|d| (d.chunk_id.clone(), d)).collect();
 
     if lancedb_hits.is_empty() && falkor_hits.is_empty() {
         lancedb_hits = index_docs
             .iter()
             .map(|d| {
-                let lex = lexical_score(&q_tokens, &d.content);
                 let vec = cosine(&q_embedding, &d.embedding);
-                let s = match mode {
-                    "vector" => vec,
-                    "hybrid" => (0.6 * vec) + (0.4 * lex),
-                    _ => (0.6 * vec) + (0.4 * lex),
-                };
                 QueryHit {
-                    score: s,
+                    score: vec,
                     file_path: d.source_path.clone(),
                     chunk_id: d.chunk_id.clone(),
                     chunk_index: d.chunk_index,
@@ -183,25 +160,9 @@ pub fn run_query(
 
     let mut hits: Vec<QueryHit> = merged
         .into_values()
-        .map(|d| {
-            let (lex, vec) = if let Some(doc) = doc_by_id.get(&d.chunk_id) {
-                (
-                    lexical_score(&q_tokens, &doc.content),
-                    cosine(&q_embedding, &doc.embedding),
-                )
-            } else {
-                (lexical_score(&q_tokens, &d.content), 0.0)
-            };
-            let s = match mode {
-                "vector" => (0.75 * vec) + (0.25 * d.score),
-                "hybrid" => (0.5 * vec) + (0.25 * lex) + (0.25 * d.score),
-                _ => (0.5 * vec) + (0.25 * lex) + (0.25 * d.score),
-            };
-            QueryHit {
-                score: s,
-                group_key: Some(d.file_path.clone()),
-                ..d
-            }
+        .map(|d| QueryHit {
+            group_key: Some(d.file_path.clone()),
+            ..d
         })
         .filter(|h| h.score > 0.0)
         .collect();
@@ -212,6 +173,46 @@ pub fn run_query(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.file_path.cmp(&b.file_path))
     });
+
+    let mode = if use_reranker && !hits.is_empty() {
+        if let Ok(Some(mut reranker)) = try_create_reranker(DEFAULT_RERANKER_MODEL) {
+            let limit = hits.len().min(RERANK_LIMIT);
+            let to_rerank: Vec<QueryHit> = hits.drain(..limit).collect();
+            let contents: Vec<&str> = to_rerank.iter().map(|h| h.content.as_str()).collect();
+            let rest: Vec<QueryHit> = hits.drain(..).collect();
+            match reranker.rerank(q, &contents, false, None) {
+                Ok(results) => {
+                    let reordered: Vec<QueryHit> = results
+                        .into_iter()
+                        .map(|r| {
+                            let mut h = to_rerank[r.index].clone();
+                            h.score = r.score;
+                            h
+                        })
+                        .collect();
+                    hits = reordered;
+                    hits.extend(rest);
+                    "rerank"
+                }
+                Err(_) => {
+                    hits = to_rerank;
+                    hits.extend(rest);
+                    hits.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.file_path.cmp(&b.file_path))
+                    });
+                    "fusion"
+                }
+            }
+        } else {
+            "fusion"
+        }
+    } else {
+        "fusion"
+    };
+
     hits.truncate(top_k);
     let rerank_ms = rerank_start.elapsed().as_millis();
 
@@ -258,14 +259,14 @@ pub fn run_query(
 pub fn run_query_multi(
     packs: &[PathBuf],
     q: &str,
-    mode: &str,
     top_k: usize,
+    use_reranker: bool,
 ) -> Result<QueryResponse> {
     if packs.is_empty() {
         return Err(anyhow::anyhow!("at least one pack required"));
     }
     if packs.len() == 1 {
-        return run_query(&packs[0], q, mode, top_k, None);
+        return run_query(&packs[0], q, top_k, use_reranker, None);
     }
 
     let total_start = Instant::now();
@@ -276,10 +277,9 @@ pub fn run_query_multi(
             .map(|pack| {
                 let pack = pack.clone();
                 let q = q.to_string();
-                let mode = mode.to_string();
                 scope.spawn(move || {
                     let graph_name = graph_name_for_pack(&pack).ok();
-                    run_query(&pack, &q, &mode, top_for_backend, graph_name.as_deref())
+                    run_query(&pack, &q, top_for_backend, use_reranker, graph_name.as_deref())
                 })
             })
             .collect();
@@ -322,7 +322,7 @@ pub fn run_query_multi(
 
     Ok(QueryResponse {
         results: all_hits,
-        mode: mode.to_string(),
+        mode: if use_reranker { "rerank" } else { "fusion" }.to_string(),
         grouped_results,
         timings_ms: QueryTimings {
             embed: max_embed,
