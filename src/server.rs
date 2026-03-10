@@ -1,9 +1,9 @@
 use std::net::SocketAddr;
-use std::path::{Path as FsPath, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use axum::extract::{Path, State};
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Html;
 use axum::routing::{get, post};
@@ -14,14 +14,17 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::falkor_store::{
-    graph_name_from_env, graph_schema as falkor_graph_schema, graph_subgraph as falkor_graph_subgraph,
+    graph_counts as falkor_graph_counts, graph_name_from_env,
+    graph_schema as falkor_graph_schema, graph_subgraph as falkor_graph_subgraph,
 };
 use crate::indexer::run_index;
-use crate::ontology::OntologyEngine;
-use crate::pack::{load_index, load_manifest, save_manifest};
+use crate::file_tree::format_file_tree;
+use crate::pack::{init_pack, load_index, load_manifest, save_manifest};
+use crate::memkit_txt::ensure_memkit_txt;
+use crate::registry::{pack_dir_for_path, ensure_registered};
+use crate::types::SourceConfig;
 use crate::query::run_query;
 use crate::query_synth::synthesize_answer;
-use crate::types::SourceConfig;
 
 #[derive(Clone)]
 struct AppState {
@@ -52,6 +55,8 @@ struct JobRecord {
     job_type: JobType,
     state: JobState,
     trigger: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pack_path: Option<String>,
     enqueued_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
     finished_at: Option<DateTime<Utc>>,
@@ -102,11 +107,17 @@ struct QueryRequest {
     top_k: usize,
     #[serde(default)]
     raw: bool,
+    pack: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct SourceRequest {
-    path: String,
+#[derive(Deserialize, Default)]
+struct StatusQuery {
+    path: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct IndexRequest {
+    path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -116,11 +127,6 @@ struct SubgraphRequest {
     depth: usize,
     #[serde(default = "default_limit")]
     limit: usize,
-}
-
-#[derive(Deserialize)]
-struct OntologySourceQuery {
-    path: String,
 }
 
 fn default_mode() -> String {
@@ -167,11 +173,6 @@ pub async fn run_server(
         .route("/graph/view", get(graph_view))
         .route("/query", post(query))
         .route("/index", post(index_now))
-        .route("/jobs", get(jobs_list))
-        .route("/jobs/{id}", get(job_status))
-        .route("/sources", get(sources_list).post(sources_add).delete(sources_remove))
-        .route("/ontology/sources", get(ontology_sources))
-        .route("/ontology/source", get(ontology_source))
         .route("/mcp", post(mcp))
         .with_state(state);
 
@@ -212,11 +213,50 @@ fn can_connect_to_socket(_path: &str) -> bool {
     false
 }
 
-async fn status(State(state): State<AppState>) -> Json<Value> {
-    let manifest = load_manifest(&state.pack).ok();
-    let indexed = load_index(&state.pack)
-        .map(|idx| !idx.docs.is_empty())
-        .unwrap_or(false);
+async fn status(
+    State(state): State<AppState>,
+    Query(q): Query<StatusQuery>,
+) -> Json<Value> {
+    let pack = if let Some(ref path) = q.path {
+        let dir = PathBuf::from(path)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(path));
+        if dir.join(".memkit/manifest.json").exists() {
+            dir.join(".memkit")
+        } else if dir.join("manifest.json").exists() {
+            dir
+        } else {
+            state.pack.as_ref().clone()
+        }
+    } else {
+        state.pack.as_ref().clone()
+    };
+
+    let manifest = load_manifest(&pack).ok();
+    let index = load_index(&pack).ok();
+    let vector_count = index.as_ref().map(|i| i.docs.len()).unwrap_or(0);
+    let indexed = vector_count > 0;
+    let file_paths: Vec<String> = index
+        .as_ref()
+        .map(|i| i.docs.iter().map(|d| d.source_path.clone()).collect())
+        .unwrap_or_default();
+
+    let (entities, relationships) = state
+        .falkordb_socket
+        .as_ref()
+        .and_then(|sock| falkor_graph_counts(sock, &state.falkor_graph).ok())
+        .unwrap_or((0, 0));
+
+    let pack_str = pack.display().to_string();
+    let base_path = pack
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| *n == ".memkit")
+        .and_then(|_| pack.parent())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| pack_str.clone());
+    let file_tree = format_file_tree(&file_paths, &base_path);
+
     let (active_job, last_job, queued_jobs) = {
         let jobs = state.jobs.lock().await;
         let active = jobs
@@ -231,10 +271,15 @@ async fn status(State(state): State<AppState>) -> Json<Value> {
             .cloned();
         (active, last, jobs.queue.len())
     };
+
     Json(json!({
         "status": "ok",
-        "pack_path": state.pack.display().to_string(),
+        "pack_path": pack_str,
         "indexed": indexed,
+        "vector_count": vector_count,
+        "entities": entities,
+        "relationships": relationships,
+        "file_tree": file_tree,
         "sources": manifest.map(|m| m.sources).unwrap_or_default(),
         "jobs": {
             "active": active_job,
@@ -299,7 +344,7 @@ async fn graph_view() -> Html<&'static str> {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Satori Graph View</title>
+  <title>Memkit Graph View</title>
   <style>
     body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0; background: #111; color: #f5f5f5; }
     #top { padding: 12px; display: flex; gap: 8px; align-items: center; }
@@ -363,7 +408,20 @@ async fn query(
     State(state): State<AppState>,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    match run_query(&state.pack, &req.query, &req.mode, req.top_k) {
+    let pack = if let Some(ref path) = req.pack {
+        let dir = PathBuf::from(path);
+        if dir.join(".memkit/manifest.json").exists() {
+            dir.join(".memkit")
+        } else if dir.join("manifest.json").exists() {
+            dir
+        } else {
+            state.pack.as_ref().clone()
+        }
+    } else {
+        state.pack.as_ref().clone()
+    };
+
+    match run_query(&pack, &req.query, &req.mode, req.top_k) {
         Ok(resp) => {
             if req.raw {
                 Ok(Json(json!(resp)))
@@ -409,8 +467,79 @@ async fn query(
 
 async fn index_now(
     State(state): State<AppState>,
+    Json(req): Json<IndexRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let job = enqueue_index_job(&state, "manual_index").await;
+    let (pack_to_index, _is_new_default) = if let Some(path) = req.path {
+        let dir = PathBuf::from(&path)
+            .canonicalize()
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":{"code":"PATH_INVALID","message":format!("path not accessible: {}", e)}})),
+                )
+            })?;
+        let pack_dir = pack_dir_for_path(&dir);
+        let normalized = dir.to_string_lossy().to_string();
+
+        let _ = ensure_memkit_txt(&dir);
+
+        if !pack_dir.join("manifest.json").exists() {
+            init_pack(&pack_dir, false, "fastembed", "BAAI/bge-small-en-v1.5", 384)
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error":{"code":"INIT_FAILED","message":e.to_string()}})),
+                    )
+                })?;
+            let mut manifest = load_manifest(&pack_dir).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error":{"code":"PACK_INVALID","message":e.to_string()}})),
+                )
+            })?;
+            manifest.sources.push(SourceConfig {
+                root_path: normalized.clone(),
+                include: vec!["**/*".to_string()],
+                exclude: vec!["**/.git/**".to_string(), "**/target/**".to_string()],
+            });
+            save_manifest(&pack_dir, manifest).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error":{"code":"PACK_WRITE_FAILED","message":e.to_string()}})),
+                )
+            })?;
+        } else {
+            let mut manifest = load_manifest(&pack_dir).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":{"code":"PACK_INVALID","message":e.to_string()}})),
+                )
+            })?;
+            if !manifest.sources.iter().any(|s| s.root_path == normalized) {
+                manifest.sources.push(SourceConfig {
+                    root_path: normalized.clone(),
+                    include: vec!["**/*".to_string()],
+                    exclude: vec!["**/.git/**".to_string(), "**/target/**".to_string()],
+                });
+                save_manifest(&pack_dir, manifest).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error":{"code":"PACK_WRITE_FAILED","message":e.to_string()}})),
+                    )
+                })?;
+            }
+        }
+
+        let reg = crate::registry::load_registry().unwrap_or_default();
+        let is_first = reg.packs.is_empty();
+        let _ = ensure_registered(&normalized, is_first);
+
+        (Some(pack_dir.to_string_lossy().to_string()), is_first)
+    } else {
+        (None, false)
+    };
+
+    let job = enqueue_index_job(&state, "manual_index", pack_to_index).await;
     start_next_job_if_idle(state.clone());
     Ok(Json(json!({
         "status":"accepted",
@@ -418,159 +547,7 @@ async fn index_now(
     })))
 }
 
-fn normalize_source_path(path: &str) -> Result<String, (StatusCode, Json<Value>)> {
-    let p = PathBuf::from(path);
-    let meta = std::fs::metadata(&p).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":{"code":"SOURCE_INVALID","message":format!("path not accessible: {}", e)}})),
-        )
-    })?;
-    if !meta.is_dir() && !meta.is_file() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":{"code":"SOURCE_INVALID","message":"source must be a file or directory"}})),
-        ));
-    }
-    let normalized = p.canonicalize().map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":{"code":"SOURCE_INVALID","message":format!("failed to canonicalize source path: {}", e)}})),
-        )
-    })?;
-    Ok(normalized.to_string_lossy().to_string())
-}
-
-fn canonicalize_if_exists(path: &str) -> Option<String> {
-    PathBuf::from(path)
-        .canonicalize()
-        .ok()
-        .map(|p| p.to_string_lossy().to_string())
-}
-
-async fn sources_list(State(state): State<AppState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let manifest = load_manifest(&state.pack).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":{"code":"PACK_INVALID","message":e.to_string()}})),
-        )
-    })?;
-    Ok(Json(json!({
-        "status":"ok",
-        "sources": manifest.sources
-    })))
-}
-
-async fn sources_add(
-    State(state): State<AppState>,
-    Json(req): Json<SourceRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut manifest = load_manifest(&state.pack).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":{"code":"PACK_INVALID","message":e.to_string()}})),
-        )
-    })?;
-    let normalized = normalize_source_path(&req.path)?;
-    if manifest.sources.iter().any(|s| s.root_path == normalized) {
-        return Ok(Json(json!({
-            "status":"ok",
-            "added": false,
-            "reason":"already_exists",
-            "source": normalized,
-            "sources": manifest.sources
-        })));
-    }
-
-    manifest.sources.push(SourceConfig {
-        root_path: normalized.clone(),
-        include: vec!["**/*".to_string()],
-        exclude: vec!["**/.git/**".to_string(), "**/target/**".to_string()],
-    });
-    save_manifest(&state.pack, manifest.clone()).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":{"code":"PACK_WRITE_FAILED","message":e.to_string()}})),
-        )
-    })?;
-    let job = enqueue_index_job(&state, "source_add").await;
-    start_next_job_if_idle(state.clone());
-
-    Ok(Json(json!({
-        "status":"ok",
-        "added": true,
-        "source": normalized,
-        "sources": manifest.sources,
-        "job": job
-    })))
-}
-
-async fn sources_remove(
-    State(state): State<AppState>,
-    Json(req): Json<SourceRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let mut manifest = load_manifest(&state.pack).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":{"code":"PACK_INVALID","message":e.to_string()}})),
-        )
-    })?;
-
-    let normalized_req = canonicalize_if_exists(&req.path).unwrap_or_else(|| req.path.clone());
-    let before = manifest.sources.len();
-    manifest.sources.retain(|s| {
-        if s.root_path == req.path || s.root_path == normalized_req {
-            return false;
-        }
-        if let Some(canon) = canonicalize_if_exists(&s.root_path) {
-            canon != req.path && canon != normalized_req
-        } else {
-            true
-        }
-    });
-    let removed = before.saturating_sub(manifest.sources.len());
-
-    save_manifest(&state.pack, manifest.clone()).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":{"code":"PACK_WRITE_FAILED","message":e.to_string()}})),
-        )
-    })?;
-
-    Ok(Json(json!({
-        "status":"ok",
-        "removed": removed,
-        "source": req.path,
-        "sources": manifest.sources
-    })))
-}
-
-async fn jobs_list(State(state): State<AppState>) -> Json<Value> {
-    let jobs = state.jobs.lock().await;
-    Json(json!({
-        "status":"ok",
-        "jobs": jobs.jobs
-    }))
-}
-
-async fn job_status(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let jobs = state.jobs.lock().await;
-    let Some(job) = jobs.find(&id).cloned() else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json!({"error":{"code":"JOB_NOT_FOUND","message":"job not found"}})),
-        ));
-    };
-    Ok(Json(json!({
-        "status":"ok",
-        "job": job
-    })))
-}
-
-async fn enqueue_index_job(state: &AppState, trigger: &str) -> Value {
+async fn enqueue_index_job(state: &AppState, trigger: &str, pack_path: Option<String>) -> Value {
     let mut jobs = state.jobs.lock().await;
     let id = format!("job-{}", jobs.next_id);
     jobs.next_id += 1;
@@ -579,6 +556,7 @@ async fn enqueue_index_job(state: &AppState, trigger: &str) -> Value {
         job_type: JobType::IndexSources,
         state: JobState::Queued,
         trigger: trigger.to_string(),
+        pack_path: pack_path.clone(),
         enqueued_at: Utc::now(),
         started_at: None,
         finished_at: None,
@@ -592,7 +570,7 @@ async fn enqueue_index_job(state: &AppState, trigger: &str) -> Value {
 
 fn start_next_job_if_idle(state: AppState) {
     tokio::spawn(async move {
-        let maybe_job_id = {
+        let (maybe_job_id, pack_to_use) = {
             let mut jobs = state.jobs.lock().await;
             if jobs.running.is_some() {
                 return;
@@ -600,23 +578,26 @@ fn start_next_job_if_idle(state: AppState) {
             let Some(id) = jobs.queue.pop_front() else {
                 return;
             };
+            let pack_path = jobs.find(&id).and_then(|j| j.pack_path.clone());
             jobs.running = Some(id.clone());
             if let Some(job) = jobs.find_mut(&id) {
                 job.state = JobState::Running;
                 job.started_at = Some(Utc::now());
             }
-            id
+            let pack = pack_path
+                .map(PathBuf::from)
+                .unwrap_or_else(|| (*state.pack).clone());
+            (id, pack)
         };
 
-        let pack = state.pack.clone();
         let run_outcome = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-            let manifest = load_manifest(&pack)?;
+            let manifest = load_manifest(&pack_to_use)?;
             let sources: Vec<PathBuf> = manifest
                 .sources
                 .iter()
                 .map(|s| PathBuf::from(&s.root_path))
                 .collect();
-            let (scanned, updated, chunks) = run_index(&pack, &sources)?;
+            let (scanned, updated, chunks) = run_index(&pack_to_use, &sources)?;
             Ok(json!({
                 "scanned": scanned,
                 "updated_files": updated,
@@ -646,196 +627,6 @@ fn start_next_job_if_idle(state: AppState) {
     });
 }
 
-async fn ontology_sources(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let candidates = OntologyEngine::source_candidates(&state.pack).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":{"code":"ONTOLOGY_LIST_FAILED","message":e.to_string()}})),
-        )
-    })?;
-    let mut out = Vec::new();
-    for candidate in candidates {
-        match OntologyEngine::read_artifact(&candidate.artifact_path) {
-            Ok(artifact) => out.push(json!({
-                "source_path": artifact.source_path,
-                "provider": artifact.provider,
-                "model": artifact.model,
-                "chunk_count": artifact.chunk_count,
-                "generated_at": artifact.generated_at,
-                "artifact_path": candidate.artifact_path.display().to_string()
-            })),
-            Err(e) => out.push(json!({
-                "artifact_path": candidate.artifact_path.display().to_string(),
-                "error": e.to_string()
-            })),
-        }
-    }
-    Ok(Json(json!({"status":"ok","sources":out})))
-}
-
-async fn ontology_source(
-    State(state): State<AppState>,
-    axum::extract::Query(req): axum::extract::Query<OntologySourceQuery>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let lookup_path = req.path.clone();
-    let lookup_normalized = canonicalize_if_exists(&lookup_path).unwrap_or_else(|| lookup_path.clone());
-    let maybe_path = OntologyEngine::find_artifact_for_source(&state.pack, &lookup_path)
-        .and_then(|v| {
-            if v.is_some() {
-                Ok(v)
-            } else {
-                OntologyEngine::find_artifact_for_source(&state.pack, &lookup_normalized)
-            }
-        })
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error":{"code":"ONTOLOGY_SOURCE_LOOKUP_FAILED","message":e.to_string()}})),
-            )
-        })?;
-    let Some(path) = maybe_path else {
-        let candidates = OntologyEngine::source_candidates(&state.pack).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error":{"code":"ONTOLOGY_SOURCE_LOOKUP_FAILED","message":e.to_string()}})),
-            )
-        })?;
-        let is_directory = FsPath::new(&lookup_normalized).is_dir();
-        let suggestions = suggestion_candidates(&lookup_normalized, is_directory, &candidates, 10)
-            .into_iter()
-            .map(|c| {
-                json!({
-                    "source_path": c.source_path,
-                    "artifact_path": c.artifact_path.display().to_string()
-                })
-            })
-            .collect::<Vec<_>>();
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error":{
-                    "code":"ONTOLOGY_SOURCE_NOT_FOUND",
-                    "message":"no ontology artifact for source",
-                    "lookup_path": lookup_path,
-                    "is_directory": is_directory,
-                    "suggestions": suggestions
-                }
-            })),
-        ));
-    };
-
-    let artifact = OntologyEngine::read_artifact(&path).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":{"code":"ONTOLOGY_SOURCE_READ_FAILED","message":e.to_string()}})),
-        )
-    })?;
-    Ok(Json(json!({
-        "status":"ok",
-        "artifact_path": path.display().to_string(),
-        "artifact": artifact
-    })))
-}
-
-fn suggestion_candidates(
-    lookup_path: &str,
-    is_directory: bool,
-    candidates: &[crate::ontology::OntologySourceCandidate],
-    limit: usize,
-) -> Vec<crate::ontology::OntologySourceCandidate> {
-    if candidates.is_empty() {
-        return Vec::new();
-    }
-
-    if is_directory {
-        let by_prefix = OntologyEngine::filter_candidates_by_prefix(candidates, lookup_path);
-        if by_prefix.is_empty() {
-            return candidates.iter().take(limit).cloned().collect();
-        }
-        return by_prefix.into_iter().take(limit).collect();
-    }
-
-    let lookup = FsPath::new(lookup_path);
-    let parent = lookup.parent().and_then(|p| p.to_str()).unwrap_or("");
-    let file_name = lookup.file_name().and_then(|f| f.to_str()).unwrap_or("");
-
-    let mut scored = candidates
-        .iter()
-        .map(|c| {
-            let mut score = 0i32;
-            if !parent.is_empty() && c.source_path.starts_with(parent) {
-                score += 2;
-            }
-            if !file_name.is_empty() && c.source_path.contains(file_name) {
-                score += 1;
-            }
-            (score, c.clone())
-        })
-        .collect::<Vec<_>>();
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.source_path.cmp(&b.1.source_path)));
-    scored
-        .into_iter()
-        .filter(|(score, _)| *score > 0)
-        .map(|(_, c)| c)
-        .take(limit)
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use crate::ontology::OntologySourceCandidate;
-
-    use super::suggestion_candidates;
-
-    #[test]
-    fn directory_lookup_returns_prefix_matches() {
-        let candidates = vec![
-            OntologySourceCandidate {
-                source_path: "/repo/specs/a.md".to_string(),
-                artifact_path: PathBuf::from("/tmp/a.json"),
-            },
-            OntologySourceCandidate {
-                source_path: "/repo/specs/b.md".to_string(),
-                artifact_path: PathBuf::from("/tmp/b.json"),
-            },
-            OntologySourceCandidate {
-                source_path: "/repo/src/main.rs".to_string(),
-                artifact_path: PathBuf::from("/tmp/c.json"),
-            },
-        ];
-
-        let out = suggestion_candidates("/repo/specs", true, &candidates, 10);
-        assert_eq!(out.len(), 2);
-        assert!(out.iter().all(|c| c.source_path.starts_with("/repo/specs")));
-    }
-
-    #[test]
-    fn file_lookup_prefers_same_parent() {
-        let candidates = vec![
-            OntologySourceCandidate {
-                source_path: "/repo/specs/a.md".to_string(),
-                artifact_path: PathBuf::from("/tmp/a.json"),
-            },
-            OntologySourceCandidate {
-                source_path: "/repo/specs/b.md".to_string(),
-                artifact_path: PathBuf::from("/tmp/b.json"),
-            },
-            OntologySourceCandidate {
-                source_path: "/repo/docs/readme.md".to_string(),
-                artifact_path: PathBuf::from("/tmp/c.json"),
-            },
-        ];
-
-        let out = suggestion_candidates("/repo/specs/missing.md", false, &candidates, 10);
-        assert!(!out.is_empty());
-        assert!(out[0].source_path.starts_with("/repo/specs"));
-    }
-}
-
 async fn mcp(
     State(state): State<AppState>,
     Json(payload): Json<Value>,
@@ -846,7 +637,7 @@ async fn mcp(
     let result = match method {
         "initialize" => json!({
             "protocolVersion": "2024-11-05",
-            "serverInfo": {"name":"satori","version":"0.1.0"},
+            "serverInfo": {"name":"memkit","version":"0.1.0"},
             "capabilities": {"tools": {}}
         }),
         "tools/list" => json!({
