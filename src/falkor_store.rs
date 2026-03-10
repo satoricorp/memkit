@@ -136,6 +136,22 @@ pub fn graph_name_from_env() -> String {
     std::env::var("FALKOR_GRAPH").unwrap_or_else(|_| "memkit".to_string())
 }
 
+pub fn graph_name_for_pack(pack_dir: &std::path::Path) -> Result<String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let base = graph_name_from_env();
+    match crate::pack::load_manifest(pack_dir) {
+        Ok(manifest) => Ok(format!("{}_{}", base, manifest.pack_id.replace('-', "_"))),
+        Err(_) => {
+            let path_str = pack_dir.to_string_lossy();
+            let mut hasher = DefaultHasher::new();
+            path_str.hash(&mut hasher);
+            Ok(format!("{}_{:x}", base, hasher.finish()))
+        }
+    }
+}
+
 pub fn socket_from_env() -> Option<String> {
     std::env::var("FALKORDB_SOCKET")
         .ok()

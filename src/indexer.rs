@@ -81,7 +81,11 @@ fn to_source_configs(sources: &[PathBuf]) -> Vec<SourceConfig> {
         .collect()
 }
 
-pub fn run_index(pack_dir: &Path, sources: &[PathBuf]) -> Result<(usize, usize, usize)> {
+pub fn run_index(
+    pack_dir: &Path,
+    sources: &[PathBuf],
+    graph_name_override: Option<&str>,
+) -> Result<(usize, usize, usize)> {
     let mut manifest = load_manifest(pack_dir)?;
     manifest.sources = to_source_configs(sources);
     let mut index = load_index(pack_dir)?;
@@ -228,7 +232,9 @@ pub fn run_index(pack_dir: &Path, sources: &[PathBuf]) -> Result<(usize, usize, 
 
     let mut ontology = OntologyEngine::new(pack_dir)?;
     if let Some(socket_path) = socket_from_env() {
-        let graph_name = graph_name_from_env();
+        let graph_name = graph_name_override
+            .map(String::from)
+            .unwrap_or_else(graph_name_from_env);
         let deleted_paths: Vec<String> = previous_paths
             .difference(&seen_paths)
             .cloned()
