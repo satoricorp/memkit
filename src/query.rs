@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Result;
 
 use crate::embed::provider_from_name;
 use crate::falkor_store::{
-    graph_name_from_env, query_chunks as query_falkor_chunks, socket_from_env,
+    graph_name_for_pack, graph_name_from_env, query_chunks as query_falkor_chunks, socket_from_env,
 };
 use crate::lancedb_store::hybrid_query;
 use crate::pack::load_index;
@@ -49,7 +49,13 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-pub fn run_query(pack_dir: &Path, q: &str, mode: &str, top_k: usize) -> Result<QueryResponse> {
+pub fn run_query(
+    pack_dir: &Path,
+    q: &str,
+    mode: &str,
+    top_k: usize,
+    graph_name_override: Option<&str>,
+) -> Result<QueryResponse> {
     let total_start = Instant::now();
     let manifest = load_manifest(pack_dir)?;
     let index = load_index(pack_dir)?;
@@ -84,7 +90,9 @@ pub fn run_query(pack_dir: &Path, q: &str, mode: &str, top_k: usize) -> Result<Q
     let query_text = q.to_string();
     let query_embedding = q_embedding.clone();
     let falkor_socket = socket_from_env();
-    let graph_name = graph_name_from_env();
+    let graph_name = graph_name_override
+        .map(String::from)
+        .unwrap_or_else(graph_name_from_env);
     let top_for_backend = top_k.saturating_mul(2);
     let (mut lancedb_hits, falkor_hits) = std::thread::scope(|scope| {
         let lance = scope.spawn(|| {
@@ -242,6 +250,84 @@ pub fn run_query(pack_dir: &Path, q: &str, mode: &str, top_k: usize) -> Result<Q
             embed: embed_ms,
             retrieval: retrieval_ms,
             rerank: rerank_ms,
+            total: total_start.elapsed().as_millis(),
+        },
+    })
+}
+
+pub fn run_query_multi(
+    packs: &[PathBuf],
+    q: &str,
+    mode: &str,
+    top_k: usize,
+) -> Result<QueryResponse> {
+    if packs.is_empty() {
+        return Err(anyhow::anyhow!("at least one pack required"));
+    }
+    if packs.len() == 1 {
+        return run_query(&packs[0], q, mode, top_k, None);
+    }
+
+    let total_start = Instant::now();
+    let top_for_backend = top_k.saturating_mul(2);
+    let results: Vec<QueryResponse> = std::thread::scope(|scope| {
+        let handles: Vec<_> = packs
+            .iter()
+            .map(|pack| {
+                let pack = pack.clone();
+                let q = q.to_string();
+                let mode = mode.to_string();
+                scope.spawn(move || {
+                    let graph_name = graph_name_for_pack(&pack).ok();
+                    run_query(&pack, &q, &mode, top_for_backend, graph_name.as_deref())
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or(Err(anyhow::anyhow!("thread join failed"))))
+            .collect::<Result<Vec<_>>>()
+    })?;
+
+    let mut all_hits = Vec::new();
+    let mut all_grouped = Vec::new();
+    let mut max_embed = 0u128;
+    let mut max_retrieval = 0u128;
+    let mut max_rerank = 0u128;
+    for r in &results {
+        all_hits.extend(r.results.clone());
+        all_grouped.extend(r.grouped_results.clone());
+        max_embed = max_embed.max(r.timings_ms.embed);
+        max_retrieval = max_retrieval.max(r.timings_ms.retrieval);
+        max_rerank = max_rerank.max(r.timings_ms.rerank);
+    }
+
+    all_hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.file_path.cmp(&b.file_path))
+    });
+    all_hits.truncate(top_k);
+
+    all_grouped.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let grouped_results: Vec<QueryGroup> = all_grouped
+        .into_iter()
+        .take(top_k)
+        .collect();
+
+    Ok(QueryResponse {
+        results: all_hits,
+        mode: mode.to_string(),
+        grouped_results,
+        timings_ms: QueryTimings {
+            embed: max_embed,
+            retrieval: max_retrieval,
+            rerank: max_rerank,
             total: total_start.elapsed().as_millis(),
         },
     })
