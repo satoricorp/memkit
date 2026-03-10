@@ -13,7 +13,7 @@ OUT="${MODELS_DIR}/${MODEL_FILE}"
 
 if [ -f "$OUT" ]; then
   echo "Model already exists: $OUT"
-  echo "Set SATORI_ONTOLOGY_MODEL=$OUT"
+  echo "Set MEMKIT_ONTOLOGY_MODEL=$OUT"
   exit 0
 fi
 
@@ -21,5 +21,5 @@ echo "Downloading TinyLlama GGUF (~700MB) to $OUT"
 curl -fL "$URL" -o "$OUT"
 echo "Downloaded: $OUT"
 echo ""
-echo "Set SATORI_ONTOLOGY_MODEL=$OUT"
+echo "Set MEMKIT_ONTOLOGY_MODEL=$OUT"
 echo "Then restart the daemon: bun run local:stop && bun run local:start"

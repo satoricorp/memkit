@@ -23,7 +23,7 @@ impl OntologyProvider for CandleOntologyProvider {
 
     fn extract(&mut self, _content: &str, _max_entities: usize) -> Result<OntologyExtraction> {
         Err(anyhow!(
-            "candle ontology provider is not implemented yet; use SATORI_ONTOLOGY_PROVIDER=llama|rules"
+            "candle ontology provider is not implemented yet; use MEMKIT_ONTOLOGY_PROVIDER=llama|rules"
         ))
     }
 }

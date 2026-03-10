@@ -5,10 +5,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Build artifact from this repository.
-COPY target/release/satori /usr/local/bin/satori-api
-RUN chmod +x /usr/local/bin/satori-api
+COPY target/release/mk /usr/local/bin/memkit-api
+RUN chmod +x /usr/local/bin/memkit-api
 
-COPY docker/supervisord.conf /etc/supervisor/conf.d/satori.conf
+COPY docker/supervisord.conf /etc/supervisor/conf.d/memkit.conf
 COPY docker/scripts/start.sh /start.sh
 RUN chmod +x /start.sh
 

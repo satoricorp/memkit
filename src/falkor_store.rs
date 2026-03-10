@@ -133,7 +133,7 @@ fn rows_from_compact(value: &Value) -> Vec<Vec<JsonValue>> {
 }
 
 pub fn graph_name_from_env() -> String {
-    std::env::var("FALKOR_GRAPH").unwrap_or_else(|_| "satori".to_string())
+    std::env::var("FALKOR_GRAPH").unwrap_or_else(|_| "memkit".to_string())
 }
 
 pub fn socket_from_env() -> Option<String> {
@@ -277,6 +277,23 @@ pub fn query_chunks(
     });
     out.truncate(top_k);
     Ok(out)
+}
+
+pub fn graph_counts(socket_path: &str, graph_name: &str) -> Result<(usize, usize)> {
+    let mut con = connect_unix_socket(socket_path)?;
+    let entities = graph_query_raw(&mut con, graph_name, "MATCH (e:Entity) RETURN count(e)")?;
+    let rels = graph_query_raw(&mut con, graph_name, "MATCH ()-[r:RELATED]->() RETURN count(r)")?;
+    let entity_count = rows_from_compact(&entities)
+        .first()
+        .and_then(|r| r.first())
+        .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|x| x as u64)))
+        .unwrap_or(0) as usize;
+    let rel_count = rows_from_compact(&rels)
+        .first()
+        .and_then(|r| r.first())
+        .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|x| x as u64)))
+        .unwrap_or(0) as usize;
+    Ok((entity_count, rel_count))
 }
 
 pub fn graph_schema(socket_path: &str, graph_name: &str) -> Result<JsonValue> {

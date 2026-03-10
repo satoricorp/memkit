@@ -7,7 +7,7 @@ if [ -z "${AUTH_SECRET:-}" ]; then
   echo "warning: AUTH_SECRET is not set" >&2
 fi
 
-/usr/bin/supervisord -c /etc/supervisor/conf.d/satori.conf &
+/usr/bin/supervisord -c /etc/supervisor/conf.d/memkit.conf &
 supervisord_pid=$!
 
 i=0

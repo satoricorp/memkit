@@ -1,3 +1,10 @@
+// ONTOLOGY MODULE - INTERNAL USE ONLY
+//
+// This module provides entity/relation extraction for the indexer. It is used by
+// run_index() to populate the Falkor graph with Chunk->Entity and Entity->Entity
+// edges. There is no CLI or HTTP surface for ontology—it is purely an internal
+// pipeline step. Do not add ontology list/show/export commands or /ontology/* routes.
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -79,7 +86,7 @@ impl OntologyProviderKind {
 
     pub fn from_env() -> Self {
         Self::from_str_value(
-            &std::env::var("SATORI_ONTOLOGY_PROVIDER").unwrap_or_else(|_| "llama".to_string()),
+            &std::env::var("MEMKIT_ONTOLOGY_PROVIDER").unwrap_or_else(|_| "llama".to_string()),
         )
     }
 }
@@ -96,14 +103,14 @@ pub struct OntologyConfig {
 impl OntologyConfig {
     pub fn from_env() -> Self {
         let provider = OntologyProviderKind::from_env();
-        let model = std::env::var("SATORI_ONTOLOGY_MODEL").unwrap_or_else(|_| {
+        let model = std::env::var("MEMKIT_ONTOLOGY_MODEL").unwrap_or_else(|_| {
             ".local-runtime/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf".to_string()
         });
-        let max_tokens = std::env::var("SATORI_ONTOLOGY_MAX_TOKENS")
+        let max_tokens = std::env::var("MEMKIT_ONTOLOGY_MAX_TOKENS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(512);
-        let timeout_ms = std::env::var("SATORI_ONTOLOGY_TIMEOUT_MS")
+        let timeout_ms = std::env::var("MEMKIT_ONTOLOGY_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(20_000);

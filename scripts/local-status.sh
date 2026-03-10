@@ -23,7 +23,7 @@ if [ -x "${SCRIPT_DIR}/falkor-runtime.sh" ]; then
 else
   check_pid_file "${RUN_DIR}/falkordb.pid" "falkordb"
 fi
-check_pid_file "${RUN_DIR}/satori-api.pid" "satori-api"
+check_pid_file "${RUN_DIR}/memkit-api.pid" "memkit-api"
 
 if command -v curl >/dev/null 2>&1; then
   echo "health:"

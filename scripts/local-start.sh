@@ -16,15 +16,15 @@ AUTH_SECRET="${AUTH_SECRET:-dev-local-secret}"
 
 mkdir -p "$RUN_DIR" "$LANCEDB_PATH" "$GRAPH_PATH" "$PACK_PATH"
 
-if [ ! -x "${ROOT_DIR}/target/release/satori" ]; then
+if [ ! -x "${ROOT_DIR}/target/release/mk" ]; then
   "${SCRIPT_DIR}/local-build.sh"
 fi
 
 "${SCRIPT_DIR}/falkor-ensure.sh"
 FALKORDB_SOCKET="$SOCKET_PATH" GRAPH_PATH="$GRAPH_PATH" "${SCRIPT_DIR}/falkor-runtime.sh" start
 
-if [ -f "${RUN_DIR}/satori-api.pid" ] && kill -0 "$(cat "${RUN_DIR}/satori-api.pid")" 2>/dev/null; then
-  echo "satori api already running"
+if [ -f "${RUN_DIR}/memkit-api.pid" ] && kill -0 "$(cat "${RUN_DIR}/memkit-api.pid")" 2>/dev/null; then
+  echo "memkit server already running"
 else
   nohup env \
     FALKORDB_SOCKET="$SOCKET_PATH" \
@@ -33,14 +33,14 @@ else
     PACK_PATH="$PACK_PATH" \
     API_PORT="$API_PORT" \
     AUTH_SECRET="$AUTH_SECRET" \
-    ${SATORI_ONTOLOGY_MODEL:+SATORI_ONTOLOGY_MODEL="$SATORI_ONTOLOGY_MODEL"} \
-    "${ROOT_DIR}/target/release/satori" \
-    --headless-serve \
+    ${MEMKIT_ONTOLOGY_MODEL:+MEMKIT_ONTOLOGY_MODEL="$MEMKIT_ONTOLOGY_MODEL"} \
+    "${ROOT_DIR}/target/release/mk" \
+    serve \
     --pack "$PACK_PATH" \
     --host "$API_HOST" \
     --port "$API_PORT" \
-    > "${RUN_DIR}/satori-api.log" 2>&1 &
-  echo $! > "${RUN_DIR}/satori-api.pid"
+    > "${RUN_DIR}/memkit-api.log" 2>&1 &
+  echo $! > "${RUN_DIR}/memkit-api.pid"
 fi
 
 echo "started local stack"

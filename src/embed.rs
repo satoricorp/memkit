@@ -38,7 +38,7 @@ impl FastEmbedProvider {
             _ => EmbeddingModel::BGESmallENV15,
         };
         let mut opts = InitOptions::new(model).with_show_download_progress(true);
-        if let Ok(cache_dir) = std::env::var("SATORI_MODEL_CACHE") {
+        if let Ok(cache_dir) = std::env::var("MEMKIT_MODEL_CACHE") {
             opts = opts.with_cache_dir(cache_dir.into());
         }
         let mut emb = TextEmbedding::try_new(opts)?;

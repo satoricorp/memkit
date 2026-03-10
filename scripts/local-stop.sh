@@ -19,7 +19,7 @@ stop_pid_file() {
   fi
 }
 
-stop_pid_file "${RUN_DIR}/satori-api.pid" "satori-api"
+stop_pid_file "${RUN_DIR}/memkit-api.pid" "memkit-api"
 if [ -x "${SCRIPT_DIR}/falkor-runtime.sh" ]; then
   "${SCRIPT_DIR}/falkor-runtime.sh" stop
 else

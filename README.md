@@ -1,155 +1,71 @@
-# satori
+# memkit
 
-Local memory pack CLI + daemon (Rust).
+Local memory pack CLI + server (Rust).
 
-## Runtime modes
-
-### Local Runtime (Native Rust Binary, Fast Path)
-
-Use a native release build for local speed and no Docker dependency:
-
-```bash
-bun run local:build
-AUTH_SECRET=dev-secret bun run local:start
-bun run local:status
-```
-
-Equivalent daemon aliases:
-
-```bash
-bun run daemon:start
-bun run daemon:status
-bun run daemon:stop
-```
-
-This starts:
-
-- FalkorDB sidecar over Unix socket (`FALKORDB_SOCKET`, default `/tmp/falkordb.sock`)
-- Rust API daemon (`target/release/satori --headless-serve ...`) on `API_PORT` (default `4242`)
-
-On first run, FalkorDB sidecar artifacts are downloaded and verified into `./.local-runtime/falkor/`.
-
-For query synthesis (natural language answers), run `bun run models:fetch` once to download a small GGUF model (~700MB) into `./.local-runtime/models/` (or set `SATORI_ONTOLOGY_MODEL` to your own GGUF path).
-
-Stop services:
-
-```bash
-bun run local:stop
-```
-
-### Development/Deployment with Docker
-
-Build and run the single-container stack from this repo root:
+## Build
 
 ```bash
 cargo build --release
-docker build -f docker/Dockerfile -t satori .
-docker run -p 4242:4242 -v satori-data:/data -e AUTH_SECRET=dev-secret satori
 ```
 
-Health:
+The CLI binary is `mk` (at `target/release/mk`).
+
+## Quick start
 
 ```bash
-curl -s http://127.0.0.1:4242/health
+# Build
+cargo build --release
+
+# Start server (FalkorDB sidecar + API)
+./scripts/local-start.sh
+
+# Or run server directly
+mk serve --pack ./memory-pack
+
+# CLI commands (require server to be running)
+mk list
+mk status ~/memory
+mk index ~/memory
+mk query "local memory pack"
+mk graph
 ```
 
-### Shared environment contract
+## Commands
+
+- `mk serve [--pack <path>] [--host] [--port]` — Start the server (API, MCP, SDK)
+- `mk status [dir]` — With dir: show status for that pack. Without dir: show mk list
+- `mk list` — List indexed directories with [local] [cloud]
+- `mk index <dir>` — Start background index job, print job id
+- `mk graph [--pack <dir>]` — Open graph view in browser
+- `mk query "<text>" [--pack <dir>]` — Query default pack (or --pack)
+
+## Environment
 
 - `FALKORDB_SOCKET` (default `/tmp/falkordb.sock`)
-- `FALKOR_GRAPH` (default `satori`)
-- `LANCEDB_PATH` (default local: `./.local-data/lance`, docker: `/data/lance`)
-- `API_PORT` (default `4242` for runtime scripts; `--headless-serve` still defaults to `7821` when called directly)
-- `AUTH_SECRET` (recommended; used as required runtime secret contract)
-- `SATORI_ONTOLOGY_PROVIDER` (`llama` default; `rules` or `candle` optional)
-- `SATORI_ONTOLOGY_MODEL` (GGUF model path; default `.local-runtime/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf` after `bun run models:fetch`)
-- `SATORI_ONTOLOGY_MAX_TOKENS` (default `512`)
-- `SATORI_ONTOLOGY_TIMEOUT_MS` (default `20000`)
+- `FALKOR_GRAPH` (default `memkit`)
+- `LANCEDB_PATH` (default `./.local-data/lance`)
+- `API_PORT` (default `4242`)
+- `MEMKIT_PACK_PATH` (default `./memory-pack` when using serve)
+- `MEMKIT_ONTOLOGY_PROVIDER` (`llama` default; `rules` or `candle` optional)
+- `MEMKIT_ONTOLOGY_MODEL` (GGUF model path for query synthesis)
+- `MEMKIT_ONTOLOGY_MAX_TOKENS` (default `512`)
+- `MEMKIT_ONTOLOGY_TIMEOUT_MS` (default `20000`)
 
-To enable true in-process `llama.cpp` inference via Rust bindings, build with:
+For query synthesis, run `./scripts/model-fetch.sh` once to download a GGUF model, or set `MEMKIT_ONTOLOGY_MODEL` to your own path.
 
-```bash
-cargo build --features llama-embedded
-```
-
-Notes:
-- `llama-embedded` requires local build tooling (`cmake` + C/C++ toolchain).
-- Without this feature, the `llama` provider falls back to local `llama-cli` if present.
-
-Sidecar details:
-
-- `FALKOR_RUNTIME_ROOT` (optional, defaults to `./.local-runtime/falkor`)
-- Artifacts are checksum-verified before extraction.
-- Current native sidecar support: `darwin-arm64`, `linux-x86_64`.
-
-## Quick start (command-first)
+## Docker
 
 ```bash
-bun run local:build
-bun run local:start
-./target/release/satori sources add ./specs
-./target/release/satori jobs list
-./target/release/satori index
-./target/release/satori jobs list
-./target/release/satori query "local memory pack"
-./target/release/satori status
-./target/release/satori ontology list
-./target/release/satori ontology show --source /absolute/path/to/specs/prd-v1-local-memory.md
-./target/release/satori ontology export --source /absolute/path/to/specs/prd-v1-local-memory.md --out ./specs-ontology.json
+cargo build --release
+docker build -f docker/Dockerfile -t memkit .
+docker run -p 4242:4242 -v memkit-data:/data -e AUTH_SECRET=dev-secret memkit
 ```
 
-In another terminal:
+## API
 
-```bash
-curl -s http://127.0.0.1:4242/health
-curl -s -X POST http://127.0.0.1:4242/query -H "content-type: application/json" -d '{"query":"local memory pack","mode":"hybrid","top_k":5}'
-curl -s -X POST http://127.0.0.1:4242/index -H "content-type: application/json" -d '{}'
-curl -s http://127.0.0.1:4242/graph/schema
-curl -s -X POST http://127.0.0.1:4242/graph/subgraph -H "content-type: application/json" -d '{"query":"memory pack","depth":2,"limit":25}'
-curl -s http://127.0.0.1:4242/ontology/sources
-curl -s --get http://127.0.0.1:4242/ontology/source --data-urlencode "path=./specs"
-```
-
-If you query a directory or unknown path with `/ontology/source`, the response now includes `error.suggestions[]` with valid file-level `source_path` values you can use directly.
-
-## Spec status
-
-- Current target contract is command-first (`specs/cli-v1.md` V1.1).
-- TUI is not part of the required runtime surface.
-- Background ingestion is defined as watch lifecycle (`watch start`/`watch stop`) in spec.
-- Cloud sync/push is deferred and only extension points are in scope.
-
-## Command contract (V1.1 target)
-
-- `satori status`
-- `satori query "<query>" [--mode vector|hybrid] [--top-k N]`
-- `satori index`
-- `satori sources list`
-- `satori sources add <path>`
-- `satori sources remove <path>`
-- `satori jobs list`
-- `satori jobs status <job-id>`
-- `satori --headless-serve --pack <path> [--host 127.0.0.1] [--port 7821]`
-
-## Notes
-
-- Storage is persisted in LanceDB files under `<pack>/lancedb/` (for example `chunks.lance`).
-- Indexing writes to both LanceDB and Falkor graph (when `FALKORDB_SOCKET` is available).
-- `POST /index` and `sources add` enqueue background indexing jobs and return immediately with `job` metadata.
-- Use `satori jobs list` / `satori jobs status <job-id>` (or `GET /jobs`) to monitor long-running ingestion.
-- Query retrieval fans out to LanceDB and Falkor in parallel, then applies grouped rerank.
-- Ontology extraction is local and embedded (no separate Ollama runtime required); cache is stored at `<pack>/state/ontology_cache.json`.
-- Per-source ontology artifacts are emitted under `<pack>/ontology/*.ontology.json`.
-- `GET /ontology/source` expects a file-level source path; for directories or unknown paths it returns suggestions instead of a bare not-found.
-- `satori ontology show --source <path>` prints suggestions with follow-up commands when no exact source artifact exists.
-- `llama` provider is selected by default and falls back to `rules` if unavailable.
-- `fastembed` is implemented for ONNX-based local embeddings.
-- Default init now uses `fastembed`; if model init fails, runtime falls back to `hash`.
-- `serve` performs a single startup index pass using manifest sources, then serves a static snapshot.
-- Graph inspection endpoints:
-  - `GET /graph/schema`
-  - `POST /graph/subgraph`
-  - `GET /graph/view` (simple browser visualization)
-- `/mcp` endpoint implements a minimal MCP JSON-RPC tool surface:
-  - `memory_query`
-  - `memory_status`
-  - `memory_sources`
+- `GET /health` — Health check
+- `GET /status` — Pack status
+- `POST /query` — Query with synthesis
+- `POST /index` — Trigger indexing
+- `GET /graph/view` — Graph visualization
+- `POST /mcp` — MCP JSON-RPC (memory_query, memory_status, memory_sources)

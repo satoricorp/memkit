@@ -45,7 +45,7 @@ struct LlamaRelation {
 }
 
 /// Run generic prompt completion using the Llama stack. Used by query synthesis.
-/// Reuses SATORI_ONTOLOGY_MODEL, SATORI_ONTOLOGY_MAX_TOKENS, SATORI_ONTOLOGY_TIMEOUT_MS.
+/// Reuses MEMKIT_ONTOLOGY_MODEL, MEMKIT_ONTOLOGY_MAX_TOKENS, MEMKIT_ONTOLOGY_TIMEOUT_MS.
 /// If `max_tokens_override` is Some, limits output to that many tokens (e.g. 80 for short answers).
 pub fn generate_completion(
     prompt: &str,
@@ -60,7 +60,7 @@ impl LlamaOntologyProvider {
     pub fn new(config: OntologyConfig) -> Result<Self> {
         if config.model.trim().is_empty() {
             return Err(anyhow!(
-                "SATORI_ONTOLOGY_MODEL must point to a GGUF model for llama provider"
+                "MEMKIT_ONTOLOGY_MODEL must point to a GGUF model for llama provider"
             ));
         }
         #[cfg(feature = "llama-embedded")]

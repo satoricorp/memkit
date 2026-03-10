@@ -78,7 +78,7 @@ pub fn init_pack(
 
 pub fn load_manifest(pack_dir: &Path) -> Result<Manifest> {
     let bytes =
-        fs::read(manifest_path(pack_dir)).context("manifest.json missing; run `satori init`")?;
+        fs::read(manifest_path(pack_dir)).context("manifest.json missing; run `mk index <dir>`")?;
     let manifest = serde_json::from_slice::<Manifest>(&bytes).context("invalid manifest.json")?;
     Ok(manifest)
 }
