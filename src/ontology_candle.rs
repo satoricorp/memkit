@@ -1,13 +1,13 @@
 use anyhow::{Result, anyhow};
 
-use crate::ontology::{OntologyConfig, OntologyExtraction, OntologyProvider};
+use crate::ontology::{LlmConfig, OntologyExtraction, OntologyProvider};
 
 pub struct CandleOntologyProvider {
-    _config: OntologyConfig,
+    _config: LlmConfig,
 }
 
 impl CandleOntologyProvider {
-    pub fn new(config: OntologyConfig) -> Self {
+    pub fn new(config: LlmConfig) -> Self {
         Self { _config: config }
     }
 }
@@ -23,7 +23,7 @@ impl OntologyProvider for CandleOntologyProvider {
 
     fn extract(&mut self, _content: &str, _max_entities: usize) -> Result<OntologyExtraction> {
         Err(anyhow!(
-            "candle ontology provider is not implemented yet; use MEMKIT_ONTOLOGY_PROVIDER=llama|rules"
+            "candle ontology provider is not implemented yet; use MEMKIT_LLM_PROVIDER=llama|rules"
         ))
     }
 }

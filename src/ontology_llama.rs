@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use serde::Deserialize;
 
 use crate::falkor_store::GraphRelation;
-use crate::ontology::{OntologyConfig, OntologyExtraction, OntologyProvider};
+use crate::ontology::{LlmConfig, OntologyExtraction, OntologyProvider};
 
 #[cfg(feature = "llama-embedded")]
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -25,7 +25,7 @@ use std::time::Instant;
 
 #[cfg_attr(not(feature = "llama-embedded"), derive(Debug))]
 pub struct LlamaOntologyProvider {
-    config: OntologyConfig,
+    config: LlmConfig,
     #[cfg(feature = "llama-embedded")]
     model: LlamaModel,
 }
@@ -45,11 +45,11 @@ struct LlamaRelation {
 }
 
 /// Run generic prompt completion using the Llama stack. Used by query synthesis.
-/// Reuses MEMKIT_ONTOLOGY_MODEL, MEMKIT_ONTOLOGY_MAX_TOKENS, MEMKIT_ONTOLOGY_TIMEOUT_MS.
+/// Reuses MEMKIT_LLM_MODEL, MEMKIT_LLM_MAX_TOKENS, MEMKIT_LLM_TIMEOUT_MS.
 /// If `max_tokens_override` is Some, limits output to that many tokens (e.g. 80 for short answers).
 pub fn generate_completion(
     prompt: &str,
-    config: &OntologyConfig,
+    config: &LlmConfig,
     max_tokens_override: Option<usize>,
 ) -> Result<String> {
     let provider = LlamaOntologyProvider::new(config.clone())?;
@@ -57,10 +57,10 @@ pub fn generate_completion(
 }
 
 impl LlamaOntologyProvider {
-    pub fn new(config: OntologyConfig) -> Result<Self> {
+    pub fn new(config: LlmConfig) -> Result<Self> {
         if config.model.trim().is_empty() {
             return Err(anyhow!(
-                "MEMKIT_ONTOLOGY_MODEL must point to a GGUF model for llama provider"
+                "MEMKIT_LLM_MODEL must point to a GGUF model for llama provider"
             ));
         }
         #[cfg(feature = "llama-embedded")]

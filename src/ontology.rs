@@ -86,13 +86,15 @@ impl OntologyProviderKind {
 
     pub fn from_env() -> Self {
         Self::from_str_value(
-            &std::env::var("MEMKIT_ONTOLOGY_PROVIDER").unwrap_or_else(|_| "llama".to_string()),
+            &std::env::var("MEMKIT_LLM_PROVIDER")
+                .or_else(|_| std::env::var("MEMKIT_ONTOLOGY_PROVIDER"))
+                .unwrap_or_else(|_| "llama".to_string()),
         )
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct OntologyConfig {
+pub struct LlmConfig {
     pub provider: OntologyProviderKind,
     pub model: String,
     pub max_tokens: usize,
@@ -100,17 +102,21 @@ pub struct OntologyConfig {
     pub timeout_ms: u64,
 }
 
-impl OntologyConfig {
+impl LlmConfig {
     pub fn from_env() -> Self {
         let provider = OntologyProviderKind::from_env();
-        let model = std::env::var("MEMKIT_ONTOLOGY_MODEL").unwrap_or_else(|_| {
-            ".local-runtime/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf".to_string()
-        });
-        let max_tokens = std::env::var("MEMKIT_ONTOLOGY_MAX_TOKENS")
+        let model = std::env::var("MEMKIT_LLM_MODEL")
+            .or_else(|_| std::env::var("MEMKIT_ONTOLOGY_MODEL"))
+            .unwrap_or_else(|_| {
+                ".local-runtime/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf".to_string()
+            });
+        let max_tokens = std::env::var("MEMKIT_LLM_MAX_TOKENS")
+            .or_else(|_| std::env::var("MEMKIT_ONTOLOGY_MAX_TOKENS"))
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(512);
-        let timeout_ms = std::env::var("MEMKIT_ONTOLOGY_TIMEOUT_MS")
+        let timeout_ms = std::env::var("MEMKIT_LLM_TIMEOUT_MS")
+            .or_else(|_| std::env::var("MEMKIT_ONTOLOGY_TIMEOUT_MS"))
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(20_000);
@@ -155,7 +161,7 @@ pub struct OntologyEngine {
 
 impl OntologyEngine {
     pub fn new(pack_dir: &Path) -> Result<Self> {
-        let config = OntologyConfig::from_env();
+        let config = LlmConfig::from_env();
         let cache_path = pack_dir.join("state").join("ontology_cache.json");
         let cache = if cache_path.exists() {
             let bytes = fs::read(&cache_path).context("failed to read ontology cache")?;

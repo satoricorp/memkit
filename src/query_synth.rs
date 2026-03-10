@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 
-use crate::ontology::OntologyConfig;
+use crate::ontology::LlmConfig;
 use crate::ontology_llama::generate_completion;
 use crate::types::QueryResponse;
 
@@ -29,11 +29,11 @@ pub fn synthesize_answer(query: &str, response: &QueryResponse) -> Result<(Strin
         ));
     }
 
-    let config = OntologyConfig::from_env();
+    let config = LlmConfig::from_env();
 
     if !std::path::Path::new(&config.model).exists() {
         anyhow::bail!(
-            "Model file not found: {}. Set MEMKIT_ONTOLOGY_MODEL to a GGUF path, or build with `cargo build --features llama-embedded` for in-process inference.",
+            "Model file not found: {}. Set MEMKIT_LLM_MODEL to a GGUF path, or build with `cargo build --features llama-embedded` for in-process inference.",
             config.model
         );
     }
