@@ -39,6 +39,9 @@ mk graph
 - `mk index <dir>` — Start background index job, print job id
 - `mk graph [--pack <dir>]` — Open graph view in browser
 - `mk query "<text>" [--pack <dir>]` — Query default pack (or --pack)
+- `mk schema [command]` — Introspect input schema for commands (agent-friendly)
+
+Agent-friendly flags: `--json` (input), `--output json`, `--dry-run`. See [CONTEXT.md](CONTEXT.md).
 
 ## Environment
 
