@@ -18,7 +18,7 @@ use crate::pack::{
 };
 use crate::types::{FileState, IndexStore, SourceConfig, SourceDoc};
 
-fn is_text_file(path: &Path) -> bool {
+fn is_indexable_file(path: &Path) -> bool {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -26,24 +26,21 @@ fn is_text_file(path: &Path) -> bool {
 
     match ext.as_deref() {
         Some(
-            "rs" | "ts" | "tsx" | "js" | "jsx" | "md" | "txt" | "json" | "toml" | "yaml" | "yml",
+            "rs" | "ts" | "tsx" | "js" | "jsx" | "md" | "txt" | "json" | "toml" | "yaml" | "yml"
+            | "doc" | "docx" | "xls" | "xlsx" | "xlsb",
         )
         | None => true,
         _ => false,
     }
 }
 
-fn read_text(path: &Path) -> Option<String> {
-    fs::read_to_string(path).ok()
-}
-
-fn content_hash(content: &str) -> String {
+pub(crate) fn content_hash(content: &str) -> String {
     let mut h = Sha256::new();
     h.update(content.as_bytes());
     format!("{:x}", h.finalize())
 }
 
-fn chunk_text(
+pub(crate) fn chunk_text(
     content: &str,
     target_chars: usize,
     overlap_chars: usize,
@@ -138,10 +135,10 @@ pub fn run_index(
             .filter(|e| e.file_type().is_file())
         {
             let path = entry.path();
-            if !is_text_file(path) {
+            if !is_indexable_file(path) {
                 continue;
             }
-            let Some(content) = read_text(path) else {
+            let Some(content) = crate::extract::extract_text(path) else {
                 continue;
             };
             scanned += 1;
