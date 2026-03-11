@@ -119,6 +119,27 @@ enum CliCommand {
     Help,
 }
 
+/// Packs to pass to the server when the CLI starts it. Used only for ensure_server.
+fn packs_for_command(cmd: &CliCommand) -> Result<Vec<PathBuf>> {
+    let packs = match cmd {
+        CliCommand::Add { pack, .. } => vec![resolve_pack_root(pack.as_deref())?],
+        CliCommand::Index { dir } => {
+            vec![PathBuf::from(dir)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(dir))]
+        }
+        CliCommand::Status { dir } => vec![resolve_pack_root(dir.as_deref())?],
+        CliCommand::List => vec![resolve_pack_root(None)?],
+        CliCommand::Graph { pack } => vec![resolve_pack_root(pack.as_deref())?],
+        CliCommand::Query { pack, .. } => vec![resolve_pack_root(pack.as_deref())?],
+        CliCommand::Publish { pack, .. } => vec![resolve_pack_root(pack.as_deref())?],
+        CliCommand::Serve(_) | CliCommand::Remove { .. } | CliCommand::Schema { .. } | CliCommand::Help => {
+            vec![resolve_pack_root(None)?]
+        }
+    };
+    Ok(packs)
+}
+
 fn resolve_pack_root(pack_arg: Option<&str>) -> Result<PathBuf> {
     if let Some(p) = pack_arg {
         let path = PathBuf::from(p)
@@ -631,8 +652,14 @@ async fn main() -> Result<()> {
                 _ => {}
             }
 
-            cli_client::ensure_server(&cfg).await?;
-            let out = match cmd {
+            let packs = packs_for_command(&cmd)?;
+            let guard = cli_client::ensure_server(&cfg, &packs).await?;
+
+            enum CommandOut {
+                Done,
+                Output(serde_json::Value),
+            }
+            let result: Result<CommandOut> = match cmd {
                 CliCommand::Add { path, pack } => {
                     if ctx.dry_run {
                         let pack_display = pack.as_deref().unwrap_or("(default)");
@@ -644,43 +671,46 @@ async fn main() -> Result<()> {
                             "status": "skipped"
                         });
                         println!("{}", serde_json::to_string_pretty(&out)?);
-                        return Ok(());
-                    }
-                    let source = PathBuf::from(&path)
-                        .canonicalize()
-                        .with_context(|| format!("path not found: {}", path))?;
-                    let pack_root = resolve_pack_root(pack.as_deref())?;
-                    let pack_dir = pack_dir_for_path(&pack_root);
-                    if !pack_dir.join("manifest.json").exists() {
-                        anyhow::bail!(
-                            "no memory pack at {}. run `mk index {}` first",
-                            pack_root.display(),
-                            pack_root.display()
-                        );
-                    }
-                    let (dest, pack_relative) = if source.is_dir() {
-                        let name = source
-                            .file_name()
-                            .map(|s| s.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "unnamed".to_string());
-                        let d = copy_dir_into_sources(&source, &pack_dir, &name)?;
-                        (d, format!("sources/{}", name))
+                        Ok(CommandOut::Done)
                     } else {
-                        let d = copy_file_into_sources(&source, &pack_dir)?;
-                        (d, "sources/_files".to_string())
-                    };
-                    add_source_root(&pack_dir, &pack_relative)?;
-                    if crate::term::color_stdout() {
-                        println!(
-                            "{} {} -> {}",
-                            "Copied".green(),
-                            source.display(),
-                            dest.display()
-                        );
-                    } else {
-                        println!("Copied {} -> {}", source.display(), dest.display());
+                        let source = PathBuf::from(&path)
+                            .canonicalize()
+                            .with_context(|| format!("path not found: {}", path))?;
+                        let pack_root = resolve_pack_root(pack.as_deref())?;
+                        let pack_dir = pack_dir_for_path(&pack_root);
+                        if !pack_dir.join("manifest.json").exists() {
+                            anyhow::bail!(
+                                "no memory pack at {}. run `mk index {}` first",
+                                pack_root.display(),
+                                pack_root.display()
+                            );
+                        }
+                        let (dest, pack_relative) = if source.is_dir() {
+                            let name = source
+                                .file_name()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "unnamed".to_string());
+                            let d = copy_dir_into_sources(&source, &pack_dir, &name)?;
+                            (d, format!("sources/{}", name))
+                        } else {
+                            let d = copy_file_into_sources(&source, &pack_dir)?;
+                            (d, "sources/_files".to_string())
+                        };
+                        add_source_root(&pack_dir, &pack_relative)?;
+                        if crate::term::color_stdout() {
+                            println!(
+                                "{} {} -> {}",
+                                "Copied".green(),
+                                source.display(),
+                                dest.display()
+                            );
+                        } else {
+                            println!("Copied {} -> {}", source.display(), dest.display());
+                        }
+                        let out = cli_client::index(&cfg, pack_root.to_string_lossy().as_ref(), false, ctx.output_format == OutputFormat::Json).await?;
+                        cli_client::poll_until_index_done(&cfg, pack_root.to_string_lossy().as_ref()).await?;
+                        Ok(CommandOut::Output(out))
                     }
-                    cli_client::index(&cfg, pack_root.to_string_lossy().as_ref(), false, ctx.output_format == OutputFormat::Json).await?
                 }
                 CliCommand::Status { dir } => {
                     let output_json = ctx.output_format == OutputFormat::Json;
@@ -690,15 +720,16 @@ async fn main() -> Result<()> {
                             let json_str = serde_json::to_string_pretty(&data)?;
                             println!("{}", json_str);
                         }
-                        return Ok(());
-                    }
-                    let data = cli_client::status(&cfg, dir.as_deref()).await?;
-                    if output_json {
-                        println!("{}", serde_json::to_string_pretty(&data)?);
+                        Ok(CommandOut::Done)
                     } else {
-                        cli_client::print_status(&data);
+                        let data = cli_client::status(&cfg, dir.as_deref()).await?;
+                        if output_json {
+                            println!("{}", serde_json::to_string_pretty(&data)?);
+                        } else {
+                            cli_client::print_status(&data);
+                        }
+                        Ok(CommandOut::Done)
                     }
-                    return Ok(());
                 }
                 CliCommand::List => {
                     let output_json = ctx.output_format == OutputFormat::Json;
@@ -706,14 +737,18 @@ async fn main() -> Result<()> {
                     if output_json {
                         println!("{}", serde_json::to_string_pretty(&data)?);
                     }
-                    return Ok(());
+                    Ok(CommandOut::Done)
                 }
                 CliCommand::Index { dir } => {
-                    cli_client::index(&cfg, &dir, ctx.dry_run, ctx.output_format == OutputFormat::Json).await?
+                    let out = cli_client::index(&cfg, &dir, ctx.dry_run, ctx.output_format == OutputFormat::Json).await?;
+                    if !ctx.dry_run {
+                        cli_client::poll_until_index_done(&cfg, &dir).await?;
+                    }
+                    Ok(CommandOut::Output(out))
                 }
                 CliCommand::Graph { pack: _ } => {
                     cli_client::graph_show(&cfg).await?;
-                    return Ok(());
+                    Ok(CommandOut::Done)
                 }
                 CliCommand::Publish { pack, destination } => {
                     let out = cli_client::publish(
@@ -726,7 +761,7 @@ async fn main() -> Result<()> {
                     if ctx.output_format == OutputFormat::Json {
                         println!("{}", serde_json::to_string_pretty(&out)?);
                     }
-                    return Ok(());
+                    Ok(CommandOut::Done)
                 }
                 CliCommand::Query { query, top_k, use_reranker, raw, pack } => {
                     let out = cli_client::query(&cfg, &QueryArgs { query, top_k, use_reranker, raw }, pack.as_deref()).await?;
@@ -752,20 +787,27 @@ async fn main() -> Result<()> {
                                     println!("  {}", path);
                                 }
                             }
-                            return Ok(());
+                            Ok(CommandOut::Done)
+                        } else {
+                            Ok(CommandOut::Output(out))
                         }
+                    } else {
+                        Ok(CommandOut::Output(out))
                     }
-                    out
                 }
                 CliCommand::Help | CliCommand::Serve(_) | CliCommand::Remove { .. } | CliCommand::Schema { .. } => unreachable!(),
             };
-            let json_str = serde_json::to_string_pretty(&out)?;
-            let output = if ctx.output_format == OutputFormat::Json || !crate::term::color_stdout() {
-                json_str
-            } else {
-                to_colored_json_auto(&out).unwrap_or(json_str.clone())
-            };
-            println!("{}", output);
+            guard.shutdown()?;
+            let command_out = result?;
+            if let CommandOut::Output(out) = command_out {
+                let json_str = serde_json::to_string_pretty(&out)?;
+                let output = if ctx.output_format == OutputFormat::Json || !crate::term::color_stdout() {
+                    json_str
+                } else {
+                    to_colored_json_auto(&out).unwrap_or(json_str.clone())
+                };
+                println!("{}", output);
+            }
         }
     }
 
