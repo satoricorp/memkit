@@ -67,6 +67,26 @@ pub(crate) fn chunk_text(
     out
 }
 
+/// True if the directory looks like a codebase (has common code-oriented top-level dirs).
+fn is_likely_codebase(root: &Path) -> bool {
+    const CODE_DIRS: &[&str] = &["src", "lib", "packages", "app", "pkg"];
+    let Ok(entries) = fs::read_dir(root) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if CODE_DIRS.contains(&name) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 fn to_source_configs(sources: &[PathBuf]) -> Vec<SourceConfig> {
     sources
         .iter()
@@ -129,6 +149,7 @@ pub fn run_index(
     })?;
 
     for src in sources {
+        let is_codebase = is_likely_codebase(src);
         for entry in WalkDir::new(src)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -145,7 +166,19 @@ pub fn run_index(
 
             let file_path = path.to_string_lossy().to_string();
             seen_paths.insert(file_path.clone());
-            let hash = content_hash(&content);
+
+            let relative_path = path
+                .strip_prefix(src)
+                .unwrap_or(path.as_ref())
+                .to_string_lossy()
+                .replace('\\', "/");
+            let content_to_chunk = if is_codebase && !relative_path.is_empty() {
+                format!("[{}]\n\n{}", relative_path, content)
+            } else {
+                content.clone()
+            };
+            let hash = content_hash(&content_to_chunk);
+
             let meta = fs::metadata(path).ok();
             let mtime_unix_ms = meta
                 .as_ref()
@@ -177,7 +210,7 @@ pub fn run_index(
             updated_files += 1;
             updated_paths.insert(file_path.clone());
             let chunks = chunk_text(
-                &content,
+                &content_to_chunk,
                 manifest.chunking.target_chars,
                 manifest.chunking.overlap_chars,
             );
