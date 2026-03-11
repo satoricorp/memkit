@@ -1,5 +1,7 @@
 /target
 /memory-pack
+/packages/sdk/node_modules
+/packages/sdk-py/**/__pycache__
 /memory-pack-v2
 /memory-pack-v3
 /memory-pack-test
