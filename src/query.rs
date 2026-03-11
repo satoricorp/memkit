@@ -8,9 +8,9 @@ use crate::embed::provider_from_name;
 use crate::falkor_store::{
     graph_name_for_pack, graph_name_from_env, query_chunks as query_falkor_chunks, socket_from_env,
 };
-use crate::lancedb_store::hybrid_query_with_uri;
+use crate::lancedb_store::{hybrid_query_with_uri, load_all_docs_with_uri};
 use crate::pack_location::PackLocation;
-use crate::pack::{load_index_from_loc, load_manifest_from_loc};
+use crate::pack::load_manifest_from_loc;
 use crate::rerank::{try_create_reranker, DEFAULT_RERANKER_MODEL};
 use crate::types::{QueryGroup, QueryHit, QueryResponse, QueryTimings};
 
@@ -45,7 +45,11 @@ pub fn run_query(
 ) -> Result<QueryResponse> {
     let total_start = Instant::now();
     let manifest = load_manifest_from_loc(loc)?;
-    let index = load_index_from_loc(loc)?;
+    let index_docs = load_all_docs_with_uri(
+        &loc.lancedb_uri(),
+        loc.storage_options(),
+        manifest.embedding.dimension,
+    )?;
 
     let embed_start = Instant::now();
     let mut provider = provider_from_name(
@@ -122,7 +126,6 @@ pub fn run_query(
     let retrieval_ms = retrieval_start.elapsed().as_millis();
 
     let rerank_start = Instant::now();
-    let index_docs = index.docs;
 
     if lancedb_hits.is_empty() && falkor_hits.is_empty() {
         let docs = index_docs.iter().filter(|d| {
