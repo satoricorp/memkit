@@ -1,4 +1,6 @@
+mod add_docs;
 mod cli_client;
+mod extract;
 mod file_tree;
 mod memkit_txt;
 mod registry;
