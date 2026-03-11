@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
+use std::process::{Child, Command};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -7,6 +7,22 @@ use owo_colors::OwoColorize;
 use serde_json::{Value, json};
 
 use crate::term;
+
+/// Guard for a server process started by the CLI. Call `shutdown()` when done so the child is killed and reaped.
+pub struct ServerGuard {
+    child: Option<Child>,
+}
+
+impl ServerGuard {
+    /// If the CLI started the server, terminate the child process and wait for it. No-op if server was already up.
+    pub fn shutdown(mut self) -> Result<()> {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Ok(())
+    }
+}
 
 pub struct ServerConfig {
     pub host: String,
@@ -54,63 +70,81 @@ async fn server_is_up(cfg: &ServerConfig) -> bool {
     }
 }
 
-fn candidate_server_start_script() -> Option<PathBuf> {
-    if let Ok(custom) = std::env::var("MEMKIT_SERVER_START_SCRIPT") {
-        let p = PathBuf::from(custom);
-        if p.exists() {
-            return Some(p);
-        }
-    }
+const HEALTH_POLL_INTERVAL_MS: u64 = 300;
+const HEALTH_POLL_ATTEMPTS: usize = 200; // 200 * 300ms = 60s total
 
-    let from_cwd = PathBuf::from("scripts/local-start.sh");
-    if from_cwd.exists() {
-        return Some(from_cwd);
-    }
-
-    let from_exe = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
-        .map(|p| p.join("../../scripts/local-start.sh"))
-        .map(|p| p.canonicalize().unwrap_or(p));
-    from_exe.filter(|p| p.exists())
-}
-
-fn run_server_start() -> Result<()> {
-    let script = candidate_server_start_script().ok_or_else(|| {
-        anyhow!(
-            "could not locate server start script. run `./scripts/local-start.sh` or `mk serve` manually"
+fn spawn_server(cfg: &ServerConfig, packs: &[PathBuf]) -> Result<Child> {
+    let exe = std::env::current_exe().context("failed to get current executable")?;
+    let pack_paths: String = packs
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut cmd = Command::new(&exe);
+    cmd.arg("serve")
+        .arg("--pack")
+        .arg(&pack_paths)
+        .arg("--host")
+        .arg(&cfg.host)
+        .arg("--port")
+        .arg(cfg.port.to_string())
+        .env("API_PORT", cfg.port.to_string())
+        .env("MEMKIT_PACK_PATHS", &pack_paths)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let child = cmd.spawn().with_context(|| {
+        format!(
+            "failed to start server ({}). try running `mk serve` manually or use a different port",
+            exe.display()
         )
     })?;
-    let status = Command::new("sh")
-        .arg(&script)
-        .status()
-        .with_context(|| format!("failed to execute {}", script.display()))?;
-    if !status.success() {
-        return Err(anyhow!(
-            "server auto-start failed (exit {}). run `./scripts/local-start.sh` or `mk serve` manually",
-            status
-        ));
-    }
-    Ok(())
+    Ok(child)
 }
 
-pub async fn ensure_server(cfg: &ServerConfig) -> Result<()> {
+pub async fn ensure_server(cfg: &ServerConfig, packs: &[PathBuf]) -> Result<ServerGuard> {
     if server_is_up(cfg).await {
-        return Ok(());
+        return Ok(ServerGuard { child: None });
     }
-    run_server_start()?;
-
-    for _ in 0..12 {
-        tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut child = spawn_server(cfg, packs)?;
+    for _ in 0..HEALTH_POLL_ATTEMPTS {
+        tokio::time::sleep(Duration::from_millis(HEALTH_POLL_INTERVAL_MS)).await;
         if server_is_up(cfg).await {
-            return Ok(());
+            return Ok(ServerGuard {
+                child: Some(child),
+            });
         }
     }
-
+    let _ = child.kill();
+    let _ = child.wait();
     Err(anyhow!(
-        "server did not become healthy after auto-start on {}:{}",
+        "server did not become healthy after {}s on {}:{}. run `mk serve` manually or check port",
+        (HEALTH_POLL_ATTEMPTS as u64 * HEALTH_POLL_INTERVAL_MS) / 1000,
         cfg.host,
         cfg.port
+    ))
+}
+
+/// Poll /status until the index job is no longer active (or timeout). Use after POST /index when the CLI started the server.
+pub async fn poll_until_index_done(cfg: &ServerConfig, pack_path: &str) -> Result<()> {
+    const POLL_INTERVAL: Duration = Duration::from_secs(2);
+    const MAX_WAIT: Duration = Duration::from_secs(7200); // 2 hours
+    let deadline = std::time::Instant::now() + MAX_WAIT;
+    while std::time::Instant::now() < deadline {
+        let data = status(cfg, Some(pack_path)).await?;
+        let active = data
+            .get("jobs")
+            .and_then(|j| j.get("active"))
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
+        if !active {
+            return Ok(());
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    Err(anyhow!(
+        "index job did not complete within {}s",
+        MAX_WAIT.as_secs()
     ))
 }
 
