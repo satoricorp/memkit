@@ -11,12 +11,12 @@ use crate::embed::provider_from_name;
 use crate::falkor_store::{
     ChunkGraphPayload, delete_chunks_for_paths, graph_name_from_env, socket_from_env, upsert_chunks,
 };
-use crate::lancedb_store::{ensure_chunk_ids, rebuild_tables};
+use crate::lancedb_store::{ensure_chunk_ids, load_all_docs, rebuild_tables};
 use crate::ontology::OntologyEngine;
 use crate::pack::{
-    load_file_state, load_index, load_manifest, save_file_state, save_index, save_manifest,
+    load_file_state, load_manifest, save_file_state, save_manifest,
 };
-use crate::types::{FileState, IndexStore, SourceConfig, SourceDoc};
+use crate::types::{FileState, SourceConfig, SourceDoc};
 
 fn is_indexable_file(path: &Path) -> bool {
     let ext = path
@@ -87,13 +87,20 @@ fn is_likely_codebase(root: &Path) -> bool {
     false
 }
 
-fn to_source_configs(sources: &[PathBuf]) -> Vec<SourceConfig> {
+fn to_source_configs(pack_dir: &Path, sources: &[PathBuf]) -> Vec<SourceConfig> {
     sources
         .iter()
-        .map(|p| SourceConfig {
-            root_path: p.to_string_lossy().to_string(),
-            include: vec!["**/*".to_string()],
-            exclude: vec!["**/.git/**".to_string(), "**/target/**".to_string()],
+        .map(|p| {
+            let root_path = p
+                .strip_prefix(pack_dir)
+                .ok()
+                .and_then(|r| r.to_str().map(String::from))
+                .unwrap_or_else(|| p.to_string_lossy().to_string());
+            SourceConfig {
+                root_path,
+                include: vec!["**/*".to_string()],
+                exclude: vec!["**/.git/**".to_string(), "**/target/**".to_string()],
+            }
         })
         .collect()
 }
@@ -104,15 +111,13 @@ pub fn run_index(
     graph_name_override: Option<&str>,
 ) -> Result<(usize, usize, usize)> {
     let mut manifest = load_manifest(pack_dir)?;
-    manifest.sources = to_source_configs(sources);
-    let mut index = load_index(pack_dir)?;
-    let mut file_states = load_file_state(pack_dir)?;
-
-    let existing_by_chunk: HashMap<String, SourceDoc> = index
-        .docs
-        .drain(..)
+    manifest.sources = to_source_configs(pack_dir, sources);
+    let existing_docs = load_all_docs(pack_dir, manifest.embedding.dimension)?;
+    let existing_by_chunk: HashMap<String, SourceDoc> = existing_docs
+        .into_iter()
         .map(|d| (d.chunk_id.clone(), d))
         .collect();
+    let mut file_states = load_file_state(pack_dir)?;
     let mut state_by_path: HashMap<String, FileState> = file_states
         .drain(..)
         .map(|s| (s.file_path.clone(), s))
@@ -252,11 +257,16 @@ pub fn run_index(
     // Drop states for deleted files by only carrying seen paths.
     next_states.retain(|s| seen_paths.contains(&s.file_path));
 
-    index = IndexStore { docs: next_docs };
-    ensure_chunk_ids(&mut index.docs);
+    // Preserve chunks that did not come from the file scan (e.g. memkit://add/... from /add).
+    for doc in existing_by_chunk.values() {
+        if !seen_paths.contains(&doc.source_path) {
+            next_docs.push(doc.clone());
+        }
+    }
+
+    ensure_chunk_ids(&mut next_docs);
     ensure_chunk_ids(&mut changed_docs);
-    save_index(pack_dir, &index).context("failed to persist index")?;
-    rebuild_tables(pack_dir, &index.docs, manifest.embedding.dimension)
+    rebuild_tables(pack_dir, &next_docs, manifest.embedding.dimension)
         .context("failed to rebuild lancedb tables/indexes")?;
     save_file_state(pack_dir, &next_states).context("failed to persist file state")?;
 
@@ -302,7 +312,7 @@ pub fn run_index(
 
     let mut source_contents: HashMap<String, Vec<String>> = HashMap::new();
     let mut source_hashes: HashMap<String, Vec<String>> = HashMap::new();
-    for doc in &index.docs {
+    for doc in &next_docs {
         source_contents
             .entry(doc.source_path.clone())
             .or_default()
