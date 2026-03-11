@@ -24,12 +24,14 @@ use crate::falkor_store::{
 };
 use crate::indexer::run_index;
 use crate::file_tree::format_file_tree;
-use crate::pack::{init_pack, load_index, load_manifest, save_manifest};
+use crate::lancedb_store::load_all_docs;
+use crate::pack::{
+    add_source_root, copy_dir_into_sources, init_pack, load_manifest, resolve_source_roots,
+};
 use crate::pack_location::PackLocation;
 use crate::publish::{publish_pack_to_s3, PublishDestination};
 use crate::memkit_txt::ensure_memkit_txt;
 use crate::registry::{pack_dir_for_path, ensure_registered};
-use crate::types::SourceConfig;
 use crate::query::{run_query, run_query_multi};
 use crate::query_synth::synthesize_answer;
 
@@ -305,13 +307,15 @@ async fn status(
             state.packs.first().cloned().unwrap_or_else(|| dir)
         };
         let manifest = load_manifest(&pack).ok();
-        let index = load_index(&pack).ok();
-        let vector_count = index.as_ref().map(|i| i.docs.len()).unwrap_or(0);
-        let indexed = vector_count > 0;
-        let file_paths: Vec<String> = index
+        let docs = manifest
             .as_ref()
-            .map(|i| i.docs.iter().map(|d| d.source_path.clone()).collect())
+            .and_then(|m| load_all_docs(&pack, m.embedding.dimension).ok())
             .unwrap_or_default();
+        let vector_count = docs.len();
+        let indexed = vector_count > 0;
+        let mut file_paths: Vec<String> = docs.iter().map(|d| d.source_path.clone()).collect();
+        file_paths.sort_unstable();
+        file_paths.dedup();
         let sources = manifest.map(|m| m.sources).unwrap_or_default();
         (pack.display().to_string(), sources, vector_count, indexed, file_paths)
     } else {
@@ -322,9 +326,11 @@ async fn status(
             if let Ok(m) = load_manifest(pack) {
                 all_sources.extend(m.sources);
             }
-            if let Ok(idx) = load_index(pack) {
-                total_vectors += idx.docs.len();
-                all_paths.extend(idx.docs.iter().map(|d| d.source_path.clone()));
+            if let Ok(m) = load_manifest(pack) {
+                if let Ok(docs) = load_all_docs(pack, m.embedding.dimension) {
+                    total_vectors += docs.len();
+                    all_paths.extend(docs.iter().map(|d| d.source_path.clone()));
+                }
             }
         }
         let pack_str = if state.packs.len() == 1 {
@@ -340,7 +346,7 @@ async fn status(
         .as_ref()
         .and_then(|sock| falkor_graph_counts(sock, &state.falkor_graph).ok())
         .unwrap_or((0, 0));
-    let base_path = state
+    let base_path: String = state
         .packs
         .first()
         .and_then(|p| {
@@ -675,6 +681,7 @@ async fn index_now(
     Json(req): Json<IndexRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let (pack_to_index, _is_new_default) = if let Some(path) = req.path {
+        use std::ffi::OsStr;
         let dir = PathBuf::from(&path)
             .canonicalize()
             .map_err(|e| {
@@ -696,44 +703,24 @@ async fn index_now(
                         Json(json!({"error":{"code":"INIT_FAILED","message":e.to_string()}})),
                     )
                 })?;
-            let mut manifest = load_manifest(&pack_dir).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error":{"code":"PACK_INVALID","message":e.to_string()}})),
-                )
-            })?;
-            manifest.sources.push(SourceConfig {
-                root_path: normalized.clone(),
-                include: vec!["**/*".to_string()],
-                exclude: vec!["**/.git/**".to_string(), "**/target/**".to_string()],
-            });
-            save_manifest(&pack_dir, manifest).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error":{"code":"PACK_WRITE_FAILED","message":e.to_string()}})),
-                )
-            })?;
-        } else {
-            let mut manifest = load_manifest(&pack_dir).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error":{"code":"PACK_INVALID","message":e.to_string()}})),
-                )
-            })?;
-            if !manifest.sources.iter().any(|s| s.root_path == normalized) {
-                manifest.sources.push(SourceConfig {
-                    root_path: normalized.clone(),
-                    include: vec!["**/*".to_string()],
-                    exclude: vec!["**/.git/**".to_string(), "**/target/**".to_string()],
-                });
-                save_manifest(&pack_dir, manifest).map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error":{"code":"PACK_WRITE_FAILED","message":e.to_string()}})),
-                    )
-                })?;
-            }
         }
+        let name = dir
+            .file_name()
+            .unwrap_or_else(|| OsStr::new("unnamed"))
+            .to_string_lossy();
+        copy_dir_into_sources(&dir, &pack_dir, &name).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error":{"code":"COPY_FAILED","message":e.to_string()}})),
+            )
+        })?;
+        let pack_relative = format!("sources/{}", name);
+        add_source_root(&pack_dir, &pack_relative).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error":{"code":"PACK_WRITE_FAILED","message":e.to_string()}})),
+            )
+        })?;
 
         let reg = crate::registry::load_registry().unwrap_or_default();
         let is_first = reg.packs.is_empty();
@@ -802,11 +789,7 @@ fn start_next_job_if_idle(state: AppState) {
             let multi = packs_to_index.len() > 1;
             for pack in &packs_to_index {
                 let manifest = load_manifest(pack)?;
-                let sources: Vec<PathBuf> = manifest
-                    .sources
-                    .iter()
-                    .map(|s| PathBuf::from(&s.root_path))
-                    .collect();
+                let sources = resolve_source_roots(pack, &manifest);
                 let graph_name = if multi {
                     graph_name_for_pack(pack).ok()
                 } else {
