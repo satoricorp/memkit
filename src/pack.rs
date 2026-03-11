@@ -2,20 +2,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use walkdir::WalkDir;
 use chrono::Utc;
 use uuid::Uuid;
 
 use crate::pack_location::PackLocation;
 use crate::types::{
-    ChunkingConfig, EmbeddingConfig, FileState, IndexStore, Manifest, SourceConfig,
+    ChunkingConfig, EmbeddingConfig, FileState, Manifest, SourceConfig,
 };
 
 pub fn manifest_path(pack_dir: &Path) -> PathBuf {
     pack_dir.join("manifest.json")
-}
-
-pub fn index_path(pack_dir: &Path) -> PathBuf {
-    pack_dir.join("index.json")
 }
 
 pub fn state_path(pack_dir: &Path) -> PathBuf {
@@ -63,13 +60,6 @@ pub fn init_pack(
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     fs::write(manifest_path(pack_dir), manifest_json).context("failed to write manifest.json")?;
 
-    if !index_path(pack_dir).exists() || force {
-        fs::write(
-            index_path(pack_dir),
-            serde_json::to_string_pretty(&IndexStore::default())?,
-        )
-        .context("failed to write index.json")?;
-    }
     if !state_path(pack_dir).exists() || force {
         fs::write(state_path(pack_dir), b"[]").context("failed to write state/file_state.json")?;
     }
@@ -98,28 +88,6 @@ pub fn save_manifest_to_loc(loc: &PackLocation, mut manifest: Manifest) -> Resul
     Ok(())
 }
 
-pub fn load_index(pack_dir: &Path) -> Result<IndexStore> {
-    load_index_from_loc(&PackLocation::local(pack_dir))
-}
-
-pub fn load_index_from_loc(loc: &PackLocation) -> Result<IndexStore> {
-    let bytes = match loc.read_file("index.json") {
-        Ok(b) => b,
-        Err(_) => return Ok(IndexStore::default()),
-    };
-    Ok(serde_json::from_slice::<IndexStore>(&bytes).context("invalid index.json")?)
-}
-
-pub fn save_index(pack_dir: &Path, index: &IndexStore) -> Result<()> {
-    save_index_to_loc(&PackLocation::local(pack_dir), index)
-}
-
-pub fn save_index_to_loc(loc: &PackLocation, index: &IndexStore) -> Result<()> {
-    let data = serde_json::to_vec_pretty(index)?;
-    loc.write_file("index.json", &data).context("failed writing index.json")?;
-    Ok(())
-}
-
 pub fn load_file_state(pack_dir: &Path) -> Result<Vec<FileState>> {
     load_file_state_from_loc(&PackLocation::local(pack_dir))
 }
@@ -142,8 +110,92 @@ pub fn save_file_state_to_loc(loc: &PackLocation, states: &[FileState]) -> Resul
     Ok(())
 }
 
+/// Canonical sources directory inside the pack. Add/copy puts files here; index runs from here only.
+pub const SOURCES_DIR: &str = "sources";
+/// Subdir for single-file adds (one file -> sources/_files/<name>).
+const SOURCES_FILES_DIR: &str = "_files";
+
+/// Copies a directory tree into pack_dir/sources/<name>/ preserving layout. Creates sources/ if needed.
+pub fn copy_dir_into_sources(source_dir: &Path, pack_dir: &Path, name: &str) -> Result<PathBuf> {
+    if !source_dir.is_dir() {
+        bail!("not a directory: {}", source_dir.display());
+    }
+    let sources_base = pack_dir.join(SOURCES_DIR);
+    fs::create_dir_all(&sources_base).context("failed to create sources dir")?;
+    let dest_root = sources_base.join(name);
+    if dest_root.exists() {
+        fs::remove_dir_all(&dest_root).context("failed to remove existing source dir")?;
+    }
+    fs::create_dir_all(&dest_root).context("failed to create source subdir")?;
+    for entry in WalkDir::new(source_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        let path = entry.path();
+        let rel = path.strip_prefix(source_dir).context("strip prefix")?;
+        if rel.components().any(|c| c.as_os_str() == ".memkit") {
+            continue;
+        }
+        let dest = dest_root.join(rel);
+        if let Some(p) = dest.parent() {
+            fs::create_dir_all(p).context("failed to create dest parent")?;
+        }
+        fs::copy(path, &dest).with_context(|| format!("failed to copy {}", path.display()))?;
+    }
+    Ok(dest_root)
+}
+
+/// Copies a single file into pack_dir/sources/_files/<filename>. Creates sources/_files if needed.
+pub fn copy_file_into_sources(source: &Path, pack_dir: &Path) -> Result<PathBuf> {
+    if !source.is_file() {
+        bail!("not a file: {}", source.display());
+    }
+    let name = source
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("invalid source path"))?;
+    let dest_dir = pack_dir.join(SOURCES_DIR).join(SOURCES_FILES_DIR);
+    fs::create_dir_all(&dest_dir).context("failed to create sources/_files")?;
+    let dest = dest_dir.join(name);
+    fs::copy(source, &dest).context("failed to copy file")?;
+    Ok(dest)
+}
+
+/// Adds a pack-relative source root to the manifest if not already present. Saves manifest.
+pub fn add_source_root(pack_dir: &Path, pack_relative_root: &str) -> Result<()> {
+    let mut manifest = load_manifest(pack_dir)?;
+    if manifest.sources.iter().any(|s| s.root_path == pack_relative_root) {
+        return Ok(());
+    }
+    manifest.sources.push(SourceConfig {
+        root_path: pack_relative_root.to_string(),
+        include: vec!["**/*".to_string()],
+        exclude: vec!["**/.git/**".to_string(), "**/target/**".to_string()],
+    });
+    save_manifest(pack_dir, manifest)?;
+    Ok(())
+}
+
+/// Resolves manifest source roots to absolute paths for indexing. Pack-relative roots are joined with pack_dir.
+pub fn resolve_source_roots(pack_dir: &Path, manifest: &Manifest) -> Vec<PathBuf> {
+    manifest
+        .sources
+        .iter()
+        .map(|s| {
+            let p = PathBuf::from(&s.root_path);
+            if p.is_absolute() {
+                p
+            } else {
+                pack_dir.join(&s.root_path)
+            }
+        })
+        .filter(|p| p.exists())
+        .collect()
+}
+
 /// Copies a file into the pack root and returns the destination path.
 /// Preserves the file name; overwrites if destination exists.
+/// Prefer copy_file_into_sources for the canonical layout (sources/).
 pub fn copy_file_to_pack(source: &Path, pack_root: &Path) -> Result<PathBuf> {
     if !source.is_file() {
         bail!("not a file: {}", source.display());

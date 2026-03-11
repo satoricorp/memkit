@@ -56,11 +56,6 @@ pub struct SourceDoc {
     pub indexed_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct IndexStore {
-    pub docs: Vec<SourceDoc>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryHit {
     pub score: f32,
