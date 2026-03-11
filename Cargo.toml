@@ -25,6 +25,7 @@ futures-util = "0.3"
 glob = "0.3"
 lancedb = "0.26"
 lance-index = "2.0"
+litchi = "0.0.1"
 llama-cpp-2 = { version = "0.1.138", optional = true }
 notify = "8"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
