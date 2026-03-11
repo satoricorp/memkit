@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use uuid::Uuid;
 
+use crate::pack_location::PackLocation;
 use crate::types::{
     ChunkingConfig, EmbeddingConfig, FileState, IndexStore, Manifest, SourceConfig,
 };
@@ -77,49 +78,67 @@ pub fn init_pack(
 }
 
 pub fn load_manifest(pack_dir: &Path) -> Result<Manifest> {
-    let bytes =
-        fs::read(manifest_path(pack_dir)).context("manifest.json missing; run `mk index <dir>`")?;
+    load_manifest_from_loc(&PackLocation::local(pack_dir))
+}
+
+pub fn load_manifest_from_loc(loc: &PackLocation) -> Result<Manifest> {
+    let bytes = loc.read_file("manifest.json").context("manifest.json missing; run `mk index <dir>`")?;
     let manifest = serde_json::from_slice::<Manifest>(&bytes).context("invalid manifest.json")?;
     Ok(manifest)
 }
 
 pub fn save_manifest(pack_dir: &Path, mut manifest: Manifest) -> Result<()> {
+    save_manifest_to_loc(&PackLocation::local(pack_dir), manifest)
+}
+
+pub fn save_manifest_to_loc(loc: &PackLocation, mut manifest: Manifest) -> Result<()> {
     manifest.updated_at = Utc::now();
-    fs::write(
-        manifest_path(pack_dir),
-        serde_json::to_vec_pretty(&manifest)?,
-    )
-    .context("failed writing manifest.json")?;
+    let data = serde_json::to_vec_pretty(&manifest)?;
+    loc.write_file("manifest.json", &data).context("failed writing manifest.json")?;
     Ok(())
 }
 
 pub fn load_index(pack_dir: &Path) -> Result<IndexStore> {
-    let p = index_path(pack_dir);
-    if !p.exists() {
-        return Ok(IndexStore::default());
-    }
-    let bytes = fs::read(&p).context("failed to read index.json")?;
+    load_index_from_loc(&PackLocation::local(pack_dir))
+}
+
+pub fn load_index_from_loc(loc: &PackLocation) -> Result<IndexStore> {
+    let bytes = match loc.read_file("index.json") {
+        Ok(b) => b,
+        Err(_) => return Ok(IndexStore::default()),
+    };
     Ok(serde_json::from_slice::<IndexStore>(&bytes).context("invalid index.json")?)
 }
 
 pub fn save_index(pack_dir: &Path, index: &IndexStore) -> Result<()> {
-    fs::write(index_path(pack_dir), serde_json::to_vec_pretty(index)?)
-        .context("failed writing index.json")?;
+    save_index_to_loc(&PackLocation::local(pack_dir), index)
+}
+
+pub fn save_index_to_loc(loc: &PackLocation, index: &IndexStore) -> Result<()> {
+    let data = serde_json::to_vec_pretty(index)?;
+    loc.write_file("index.json", &data).context("failed writing index.json")?;
     Ok(())
 }
 
 pub fn load_file_state(pack_dir: &Path) -> Result<Vec<FileState>> {
-    let p = state_path(pack_dir);
-    if !p.exists() {
-        return Ok(Vec::new());
-    }
-    let bytes = fs::read(p).context("failed to read file state")?;
+    load_file_state_from_loc(&PackLocation::local(pack_dir))
+}
+
+pub fn load_file_state_from_loc(loc: &PackLocation) -> Result<Vec<FileState>> {
+    let bytes = match loc.read_file("state/file_state.json") {
+        Ok(b) => b,
+        Err(_) => return Ok(Vec::new()),
+    };
     Ok(serde_json::from_slice::<Vec<FileState>>(&bytes).context("invalid file state json")?)
 }
 
 pub fn save_file_state(pack_dir: &Path, states: &[FileState]) -> Result<()> {
-    fs::write(state_path(pack_dir), serde_json::to_vec_pretty(states)?)
-        .context("failed writing state/file_state.json")?;
+    save_file_state_to_loc(&PackLocation::local(pack_dir), states)
+}
+
+pub fn save_file_state_to_loc(loc: &PackLocation, states: &[FileState]) -> Result<()> {
+    let data = serde_json::to_vec_pretty(states)?;
+    loc.write_file("state/file_state.json", &data).context("failed writing state/file_state.json")?;
     Ok(())
 }
 

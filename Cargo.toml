@@ -13,6 +13,8 @@ llama-embedded = ["dep:llama-cpp-2", "dep:encoding_rs"]
 
 [dependencies]
 anyhow = "1"
+aws-config = "1.4"
+aws-sdk-s3 = "1.54"
 colored_json = "5"
 owo-colors = { version = "4", features = ["supports-colors"] }
 arrow-array = "57"
@@ -23,7 +25,7 @@ dirs = "6"
 fastembed = "5"
 futures-util = "0.3"
 glob = "0.3"
-lancedb = "0.26"
+lancedb = { version = "0.26", features = ["aws"] }
 lance-index = "2.0"
 litchi = "0.0.1"
 llama-cpp-2 = { version = "0.1.138", optional = true }
@@ -38,3 +40,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 walkdir = "2"
 redis = "1.0.4"
 opener = "0.8"
+yup-oauth2 = { version = "12", features = ["hyper-rustls"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "tokio"] }
+hyper-rustls = "0.27"
+urlencoding = "2"

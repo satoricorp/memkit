@@ -8,9 +8,9 @@ use crate::embed::provider_from_name;
 use crate::falkor_store::{
     graph_name_for_pack, graph_name_from_env, query_chunks as query_falkor_chunks, socket_from_env,
 };
-use crate::lancedb_store::hybrid_query;
-use crate::pack::load_index;
-use crate::pack::load_manifest;
+use crate::lancedb_store::hybrid_query_with_uri;
+use crate::pack_location::PackLocation;
+use crate::pack::{load_index_from_loc, load_manifest_from_loc};
 use crate::rerank::{try_create_reranker, DEFAULT_RERANKER_MODEL};
 use crate::types::{QueryGroup, QueryHit, QueryResponse, QueryTimings};
 
@@ -36,7 +36,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 const RERANK_LIMIT: usize = 50;
 
 pub fn run_query(
-    pack_dir: &Path,
+    loc: &PackLocation,
     q: &str,
     top_k: usize,
     use_reranker: bool,
@@ -44,8 +44,8 @@ pub fn run_query(
     path_filter: Option<&str>,
 ) -> Result<QueryResponse> {
     let total_start = Instant::now();
-    let manifest = load_manifest(pack_dir)?;
-    let index = load_index(pack_dir)?;
+    let manifest = load_manifest_from_loc(loc)?;
+    let index = load_index_from_loc(loc)?;
 
     let embed_start = Instant::now();
     let mut provider = provider_from_name(
@@ -72,7 +72,8 @@ pub fn run_query(
     let embed_ms = embed_start.elapsed().as_millis();
 
     let retrieval_start = Instant::now();
-    let pack_path = pack_dir.to_path_buf();
+    let lancedb_uri = loc.lancedb_uri();
+    let storage_options = loc.storage_options().map(|o| o.to_vec());
     let query_text = q.to_string();
     let query_embedding = q_embedding.clone();
     let falkor_socket = socket_from_env();
@@ -84,8 +85,9 @@ pub fn run_query(
     let path_filter_falkor = path_filter.map(String::from);
     let (mut lancedb_hits, falkor_hits) = std::thread::scope(|scope| {
         let lance = scope.spawn(|| {
-            hybrid_query(
-                &pack_path,
+            hybrid_query_with_uri(
+                &lancedb_uri,
+                storage_options.as_deref(),
                 &query_text,
                 &query_embedding,
                 top_for_backend,
@@ -288,7 +290,7 @@ pub fn run_query_multi(
         return Err(anyhow::anyhow!("at least one pack required"));
     }
     if packs.len() == 1 {
-        return run_query(&packs[0], q, top_k, use_reranker, None, path_filter);
+        return run_query(&PackLocation::local(&packs[0]), q, top_k, use_reranker, None, path_filter);
     }
 
     let total_start = Instant::now();
@@ -298,13 +300,13 @@ pub fn run_query_multi(
         let handles: Vec<_> = packs
             .iter()
             .map(|pack| {
-                let pack = pack.clone();
+                let loc = PackLocation::local(pack.clone());
                 let q = q.to_string();
                 let pf = path_filter_owned.clone();
                 scope.spawn(move || {
-                    let graph_name = graph_name_for_pack(&pack).ok();
+                    let graph_name = loc.as_path().and_then(|p| graph_name_for_pack(p).ok());
                     run_query(
-                        &pack,
+                        &loc,
                         &q,
                         top_for_backend,
                         use_reranker,

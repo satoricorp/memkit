@@ -8,12 +8,15 @@ mod validate;
 mod embed;
 mod term;
 mod falkor_store;
+mod google;
 mod indexer;
 mod lancedb_store;
 mod ontology;
 mod ontology_candle;
 mod ontology_llama;
 mod pack;
+mod pack_location;
+mod publish;
 mod query;
 mod query_synth;
 mod rerank;
@@ -107,6 +110,10 @@ enum CliCommand {
         pack: Option<String>,
     },
     Schema { command: Option<String> },
+    Publish {
+        pack: Option<String>,
+        destination: Option<String>,
+    },
     Help,
 }
 
@@ -407,6 +414,35 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
                 pack,
             })
         }
+        "publish" => {
+            let (json_val, rest) = extract_json_from_args(&args[1..]);
+            if let Some(j) = json_val {
+                let path = j.get("path").and_then(serde_json::Value::as_str).map(String::from);
+                let destination = j.get("destination").and_then(serde_json::Value::as_str).map(String::from);
+                return Ok(CliCommand::Publish {
+                    pack: path,
+                    destination,
+                });
+            }
+            let mut pack = None;
+            let mut destination = None;
+            let mut i = 0usize;
+            while i < rest.len() {
+                if rest[i] == "--pack" && rest.get(i + 1).is_some() {
+                    pack = rest.get(i + 1).cloned();
+                    if let Some(ref p) = pack {
+                        crate::validate::validate_path(p)?;
+                    }
+                    i += 2;
+                } else if rest[i] == "--destination" && rest.get(i + 1).is_some() {
+                    destination = rest.get(i + 1).cloned();
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            Ok(CliCommand::Publish { pack, destination })
+        }
         "schema" => {
             let command = args.get(1).cloned();
             Ok(CliCommand::Schema { command })
@@ -534,6 +570,7 @@ fn print_help() {
         "  mk index <dir>",
         "  mk graph [--pack <dir>]",
         "  mk query <text> [--top-k N] [--no-rerank] [--pack <dir>] [--raw]",
+        "  mk publish [--pack <path>] [--destination s3://bucket/prefix]",
         "  mk schema [command]",
     ];
     for cmd in commands {
@@ -663,6 +700,19 @@ async fn main() -> Result<()> {
                 }
                 CliCommand::Graph { pack: _ } => {
                     cli_client::graph_show(&cfg).await?;
+                    return Ok(());
+                }
+                CliCommand::Publish { pack, destination } => {
+                    let out = cli_client::publish(
+                        &cfg,
+                        pack.as_deref(),
+                        destination.as_deref(),
+                        ctx.output_format == OutputFormat::Json,
+                    )
+                    .await?;
+                    if ctx.output_format == OutputFormat::Json {
+                        println!("{}", serde_json::to_string_pretty(&out)?);
+                    }
                     return Ok(());
                 }
                 CliCommand::Query { query, top_k, use_reranker, raw, pack } => {

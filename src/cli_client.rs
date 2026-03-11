@@ -302,3 +302,41 @@ pub async fn graph_show(cfg: &ServerConfig) -> Result<()> {
     opener::open(url).context("failed to open graph view in browser")?;
     Ok(())
 }
+
+pub async fn publish(
+    cfg: &ServerConfig,
+    pack: Option<&str>,
+    destination: Option<&str>,
+    output_json: bool,
+) -> Result<Value> {
+    let client = http_client()?;
+    let url = format!("{}/publish", cfg.base_url());
+    let mut body = serde_json::Map::new();
+    if let Some(p) = pack {
+        body.insert("path".to_string(), json!(p));
+    }
+    if let Some(d) = destination {
+        body.insert("destination".to_string(), json!(d));
+    }
+    let resp = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await?;
+    let status = resp.status();
+    let resp_body = resp.text().await?;
+    if !status.is_success() {
+        return Err(anyhow!("publish request failed: {}", resp_body));
+    }
+    let out: Value = serde_json::from_str(&resp_body)?;
+    if !output_json {
+        if let Some(uri) = out.get("uri").and_then(Value::as_str) {
+            if term::color_stdout() {
+                println!("{} {}", "Published to".green(), uri);
+            } else {
+                println!("Published to {}", uri);
+            }
+        }
+    }
+    Ok(out)
+}

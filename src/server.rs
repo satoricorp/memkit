@@ -14,6 +14,10 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::add_docs::run_add;
+use crate::google::{
+    self, fetch_doc_content, fetch_sheet_content, get_access_token, parse_doc_id, parse_sheet_ids,
+    GoogleAuthenticator,
+};
 use crate::falkor_store::{
     graph_counts as falkor_graph_counts, graph_name_for_pack, graph_name_from_env,
     graph_schema as falkor_graph_schema, graph_subgraph as falkor_graph_subgraph,
@@ -21,11 +25,20 @@ use crate::falkor_store::{
 use crate::indexer::run_index;
 use crate::file_tree::format_file_tree;
 use crate::pack::{init_pack, load_index, load_manifest, save_manifest};
+use crate::pack_location::PackLocation;
+use crate::publish::{publish_pack_to_s3, PublishDestination};
 use crate::memkit_txt::ensure_memkit_txt;
 use crate::registry::{pack_dir_for_path, ensure_registered};
 use crate::types::SourceConfig;
 use crate::query::{run_query, run_query_multi};
 use crate::query_synth::synthesize_answer;
+
+/// Optional Google integration (service account). When set, google_doc / google_sheet document types are supported.
+#[derive(Clone)]
+struct GoogleAuthState {
+    auth: Arc<GoogleAuthenticator>,
+    client_email: String,
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -33,6 +46,7 @@ struct AppState {
     falkordb_socket: Option<String>,
     falkor_graph: String,
     jobs: Arc<Mutex<JobRegistry>>,
+    google: Option<Arc<GoogleAuthState>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,6 +137,14 @@ struct IndexRequest {
     path: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+struct PublishRequest {
+    /// Pack path (directory that contains the pack, or path to .memkit). If omitted, use first pack.
+    path: Option<String>,
+    /// Full S3 destination (e.g. s3://bucket/prefix/). If omitted, use memkit bucket with tenant keys.
+    destination: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct AddDocumentItem {
     #[serde(rename = "type")]
@@ -183,11 +205,25 @@ pub async fn run_server(
     if packs.is_empty() {
         anyhow::bail!("at least one pack path required");
     }
+    let google = match google::load_service_account_key().await {
+        Ok(key) => {
+            let client_email = google::service_account_email_from_key(&key).to_string();
+            match google::build_google_authenticator(key).await {
+                Ok(auth) => Some(Arc::new(GoogleAuthState {
+                    auth: Arc::new(auth),
+                    client_email,
+                })),
+                Err(_) => None,
+            }
+        }
+        Err(_) => None,
+    };
     let state = AppState {
         packs: Arc::new(packs),
         falkordb_socket,
         falkor_graph: graph_name_from_env(),
         jobs: Arc::new(Mutex::new(JobRegistry::new())),
+        google,
     };
 
     let app = Router::new()
@@ -196,9 +232,11 @@ pub async fn run_server(
         .route("/graph/schema", get(graph_schema))
         .route("/graph/subgraph", post(graph_subgraph))
         .route("/graph/view", get(graph_view))
+        .route("/google/service-account-email", get(google_service_account_email))
         .route("/query", post(query))
         .route("/index", post(index_now))
         .route("/add", post(add_now))
+        .route("/publish", post(publish))
         .route("/mcp", post(mcp))
         .with_state(state);
 
@@ -206,6 +244,18 @@ pub async fn run_server(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn google_service_account_email(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let google = state.google.as_ref().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":{"code":"GOOGLE_NOT_CONFIGURED","message":"Google integration not configured"}})),
+        )
+    })?;
+    Ok(Json(json!({ "email": google.client_email })))
 }
 
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
@@ -457,21 +507,27 @@ async fn query(
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let resp_result = if let Some(ref path) = req.pack {
-        let dir = PathBuf::from(path);
-        let pack = if dir.join(".memkit/manifest.json").exists() {
-            dir.join(".memkit")
-        } else if dir.join("manifest.json").exists() {
-            dir
+        let loc = if path.starts_with("s3://") {
+            PackLocation::from_s3_uri(path).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":{"code":"INVALID_PACK","message":e.to_string()}})),
+                )
+            })?
         } else {
-            state.packs.first().cloned().unwrap_or_else(|| dir)
+            let dir = PathBuf::from(path);
+            let pack = if dir.join(".memkit/manifest.json").exists() {
+                dir.join(".memkit")
+            } else if dir.join("manifest.json").exists() {
+                dir
+            } else {
+                state.packs.first().cloned().unwrap_or_else(|| dir)
+            };
+            PackLocation::local(pack)
         };
-        let graph_name = if state.packs.len() > 1 {
-            graph_name_for_pack(&pack).ok()
-        } else {
-            None
-        };
+        let graph_name = loc.as_path().and_then(|p| graph_name_for_pack(p).ok());
         run_query(
-            &pack,
+            &loc,
             &req.query,
             req.top_k,
             req.use_reranker,
@@ -489,7 +545,7 @@ async fn query(
     } else {
         let pack = state.packs.first().unwrap();
         run_query(
-            pack,
+            &PackLocation::local(pack),
             &req.query,
             req.top_k,
             req.use_reranker,
@@ -538,6 +594,78 @@ async fn query(
         Err(e) => Err((
             StatusCode::BAD_REQUEST,
             Json(json!({"error":{"code":"QUERY_FAILED","message":e.to_string()}})),
+        )),
+    }
+}
+
+async fn publish(
+    State(state): State<AppState>,
+    Json(req): Json<PublishRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let pack_dir = if let Some(ref path) = req.path {
+        let dir = PathBuf::from(path)
+            .canonicalize()
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":{"code":"PATH_INVALID","message":format!("path not accessible: {}", e)}})),
+                )
+            })?;
+        if dir.join("manifest.json").exists() {
+            dir
+        } else if dir.join(".memkit/manifest.json").exists() {
+            dir.join(".memkit")
+        } else {
+            pack_dir_for_path(&dir)
+        }
+    } else {
+        state
+            .packs
+            .first()
+            .cloned()
+            .ok_or((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":{"code":"NO_PACK","message":"no pack path and no default pack"}})),
+            ))?
+    };
+    if !pack_dir.join("manifest.json").exists() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":{"code":"PACK_INVALID","message":"manifest.json not found"}})),
+        ));
+    }
+    let destination = match &req.destination {
+        Some(uri) => {
+            let uri = uri.trim();
+            if !uri.starts_with("s3://") {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":{"code":"INVALID_DESTINATION","message":"destination must be s3://bucket/prefix"}})),
+                ));
+            }
+            let rest = uri.strip_prefix("s3://").unwrap();
+            let (bucket, prefix) = match rest.find('/') {
+                Some(i) => (
+                    rest[..i].to_string(),
+                    rest[i + 1..].trim_end_matches('/').to_string(),
+                ),
+                None => (rest.to_string(), String::new()),
+            };
+            if bucket.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":{"code":"INVALID_DESTINATION","message":"empty bucket"}})),
+                ));
+            }
+            PublishDestination::UserBucket { bucket, prefix }
+        }
+        None => PublishDestination::MemkitBucket,
+    };
+    match publish_pack_to_s3(&pack_dir, destination).await {
+        Ok(uri) => Ok(Json(json!({ "uri": uri, "status": "ok" }))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":{"code":"PUBLISH_FAILED","message":e.to_string()}})),
         )),
     }
 }
@@ -730,11 +858,11 @@ async fn add_now(
         )
     })?;
 
-    let mut contents: Vec<String> = Vec::new();
+    let mut items: Vec<(String, String)> = Vec::new(); // (content, source_path)
 
     if let Some(docs) = &req.documents {
         for item in docs {
-            let content = match item.doc_type.as_str() {
+            match item.doc_type.as_str() {
                 "url" => {
                     let client = reqwest::Client::builder()
                         .timeout(std::time::Duration::from_secs(30))
@@ -751,22 +879,88 @@ async fn add_now(
                             Json(json!({"error":{"code":"FETCH_FAILED","message":e.to_string()}})),
                         )
                     })?;
-                    resp.text().await.map_err(|e| {
+                    let content = resp.text().await.map_err(|e| {
                         (
                             StatusCode::BAD_REQUEST,
                             Json(json!({"error":{"code":"FETCH_FAILED","message":e.to_string()}})),
                         )
-                    })?
+                    })?;
+                    let source_path = format!("memkit://add/{}", Utc::now().timestamp_millis());
+                    items.push((content, source_path));
                 }
-                "content" => item.value.clone(),
+                "content" => {
+                    let source_path = format!("memkit://add/{}", Utc::now().timestamp_millis());
+                    items.push((item.value.clone(), source_path));
+                }
+                "google_doc" => {
+                    let google = state.google.as_ref().ok_or_else(|| {
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({"error":{"code":"GOOGLE_NOT_CONFIGURED","message":"Google integration not configured"}})),
+                        )
+                    })?;
+                    let doc_id = parse_doc_id(&item.value).ok_or_else(|| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error":{"code":"INVALID_GOOGLE_DOC","message":"invalid Google Doc URL or ID"}})),
+                        )
+                    })?;
+                    let token = get_access_token(google.auth.as_ref())
+                        .await
+                        .map_err(|e| {
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({"error":{"code":"GOOGLE_TOKEN","message":e.to_string()}})),
+                            )
+                        })?;
+                    let (content, source_path) = fetch_doc_content(&doc_id, &token)
+                        .await
+                        .map_err(|e| {
+                            (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({"error":{"code":"GOOGLE_FETCH","message":e.to_string()}})),
+                            )
+                        })?;
+                    items.push((content, source_path));
+                }
+                "google_sheet" => {
+                    let google = state.google.as_ref().ok_or_else(|| {
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({"error":{"code":"GOOGLE_NOT_CONFIGURED","message":"Google integration not configured"}})),
+                        )
+                    })?;
+                    let (spreadsheet_id, gid) = parse_sheet_ids(&item.value).ok_or_else(|| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error":{"code":"INVALID_GOOGLE_SHEET","message":"invalid Google Sheet URL or ID"}})),
+                        )
+                    })?;
+                    let token = get_access_token(google.auth.as_ref())
+                        .await
+                        .map_err(|e| {
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({"error":{"code":"GOOGLE_TOKEN","message":e.to_string()}})),
+                            )
+                        })?;
+                    let pairs = fetch_sheet_content(&spreadsheet_id, gid, &token)
+                        .await
+                        .map_err(|e| {
+                            (
+                                StatusCode::BAD_REQUEST,
+                                Json(json!({"error":{"code":"GOOGLE_FETCH","message":e.to_string()}})),
+                            )
+                        })?;
+                    items.extend(pairs);
+                }
                 _ => {
                     return Err((
                         StatusCode::BAD_REQUEST,
-                        Json(json!({"error":{"code":"INVALID_TYPE","message":"document type must be url or content"}})),
+                        Json(json!({"error":{"code":"INVALID_TYPE","message":"document type must be url, content, google_doc, or google_sheet"}})),
                     ));
                 }
-            };
-            contents.push(content);
+            }
         }
     }
 
@@ -776,10 +970,11 @@ async fn add_now(
             .map(|m| format!("{}: {}", m.role, m.content))
             .collect::<Vec<_>>()
             .join("\n\n");
-        contents.push(text);
+        let source_path = format!("memkit://add/{}", Utc::now().timestamp_millis());
+        items.push((text, source_path));
     }
 
-    if contents.is_empty() {
+    if items.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({"error":{"code":"EMPTY_ADD","message":"documents or conversation required"}})),
@@ -788,12 +983,11 @@ async fn add_now(
 
     let run_result = tokio::task::spawn_blocking({
         let pack = pack.clone();
-        let contents = contents;
+        let items = items;
         move || -> anyhow::Result<Value> {
             let mut total_chunks = 0usize;
-            for content in &contents {
-                let source_path = format!("memkit://add/{}", chrono::Utc::now().timestamp_millis());
-                let chunks = run_add(&pack, content, &source_path)?;
+            for (content, source_path) in &items {
+                let chunks = run_add(&pack, content, source_path)?;
                 total_chunks += chunks;
             }
             Ok(json!({
@@ -872,7 +1066,7 @@ async fn mcp(
                         run_query_multi(&state.packs, &query, top_k, use_reranker, None)
                     } else {
                         let p = state.packs.first().unwrap();
-                        run_query(p, &query, top_k, use_reranker, None, None)
+                        run_query(&PackLocation::local(p), &query, top_k, use_reranker, None, None)
                     };
                     match resp {
                         Ok(r) => json!({

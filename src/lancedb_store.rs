@@ -22,6 +22,18 @@ fn db_dir(pack_dir: &Path) -> PathBuf {
     pack_dir.join("lancedb")
 }
 
+/// Connect to LanceDB at URI (file path or s3://). Optionally pass storage options for S3.
+async fn connect_lancedb(
+    uri: &str,
+    storage_options: Option<&[(String, String)]>,
+) -> std::result::Result<lancedb::Connection, anyhow::Error> {
+    let mut builder = lancedb::connect(uri);
+    if let Some(opts) = storage_options {
+        builder = builder.storage_options(opts.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    }
+    builder.execute().await.context("failed to connect lancedb")
+}
+
 fn to_chunk_id(file_path: &str, content_hash: &str, chunk_index: usize) -> String {
     let mut h = Sha256::new();
     h.update(file_path.as_bytes());
@@ -50,22 +62,22 @@ fn make_schema(embedding_dim: usize) -> Arc<Schema> {
     ]))
 }
 
-pub fn rebuild_tables(pack_dir: &Path, docs: &[SourceDoc], embedding_dim: usize) -> Result<()> {
+/// Rebuild chunks table at the given URI (file or s3://). For local path, caller should clear the dir first.
+pub fn rebuild_tables_with_uri(
+    uri: &str,
+    storage_options: Option<&[(String, String)]>,
+    docs: &[SourceDoc],
+    embedding_dim: usize,
+) -> Result<()> {
     if docs.is_empty() {
         return Ok(());
     }
-    let db_path = db_dir(pack_dir);
-    if db_path.exists() {
-        fs::remove_dir_all(&db_path).context("failed to reset lancedb directory")?;
-    }
-    fs::create_dir_all(&db_path).context("failed to create lancedb directory")?;
+    let uri = uri.to_string();
+    let storage_options: Option<Vec<(String, String)>> = storage_options.map(|o| o.to_vec());
+    let docs = docs.to_vec();
 
     let task = async move {
-        let uri = db_path.to_string_lossy().to_string();
-        let db = lancedb::connect(&uri)
-            .execute()
-            .await
-            .context("failed to connect lancedb")?;
+        let db = connect_lancedb(&uri, storage_options.as_deref()).await?;
 
         let schema = make_schema(embedding_dim);
         let chunk_id = StringArray::from_iter_values(docs.iter().map(|d| d.chunk_id.clone()));
@@ -126,6 +138,19 @@ pub fn rebuild_tables(pack_dir: &Path, docs: &[SourceDoc], embedding_dim: usize)
     Ok(())
 }
 
+pub fn rebuild_tables(pack_dir: &Path, docs: &[SourceDoc], embedding_dim: usize) -> Result<()> {
+    if docs.is_empty() {
+        return Ok(());
+    }
+    let db_path = db_dir(pack_dir);
+    if db_path.exists() {
+        fs::remove_dir_all(&db_path).context("failed to reset lancedb directory")?;
+    }
+    fs::create_dir_all(&db_path).context("failed to create lancedb directory")?;
+    let uri = db_path.to_string_lossy().to_string();
+    rebuild_tables_with_uri(&uri, None, docs, embedding_dim)
+}
+
 fn parse_hits_from_batches(
     batches: &[RecordBatch],
     score: f32,
@@ -180,27 +205,23 @@ fn path_matches_filter(file_path: &str, path_filter: &str) -> bool {
     p.contains(&f)
 }
 
-pub fn hybrid_query(
-    pack_dir: &Path,
+/// Query using LanceDB at the given URI (file path or s3://). Use storage_options for S3.
+pub fn hybrid_query_with_uri(
+    uri: &str,
+    storage_options: Option<&[(String, String)]>,
     query: &str,
     query_embedding: &[f32],
     top_k: usize,
     path_filter: Option<&str>,
 ) -> Result<Vec<QueryHit>> {
-    let db_path = db_dir(pack_dir);
-    if !db_path.exists() {
-        return Ok(Vec::new());
-    }
     let q = query.to_string();
     let vecq = query_embedding.to_vec();
     let path_filter_owned = path_filter.map(String::from);
+    let uri = uri.to_string();
+    let storage_options: Option<Vec<(String, String)>> = storage_options.map(|o| o.to_vec());
 
     let task = async move {
-        let uri = db_path.to_string_lossy().to_string();
-        let db = lancedb::connect(&uri)
-            .execute()
-            .await
-            .context("failed to connect lancedb")?;
+        let db = connect_lancedb(&uri, storage_options.as_deref()).await?;
         let table = db
             .open_table(TABLE_NAME)
             .execute()
@@ -288,21 +309,37 @@ pub fn hybrid_query(
     Ok(out)
 }
 
-pub fn append_docs(
+pub fn hybrid_query(
     pack_dir: &Path,
+    query: &str,
+    query_embedding: &[f32],
+    top_k: usize,
+    path_filter: Option<&str>,
+) -> Result<Vec<QueryHit>> {
+    let db_path = db_dir(pack_dir);
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let uri = db_path.to_string_lossy().to_string();
+    hybrid_query_with_uri(&uri, None, query, query_embedding, top_k, path_filter)
+}
+
+/// Append docs to the chunks table at the given URI. Use storage_options for S3.
+pub fn append_docs_with_uri(
+    uri: &str,
+    storage_options: Option<&[(String, String)]>,
     docs: &[SourceDoc],
     embedding_dim: usize,
 ) -> Result<()> {
     if docs.is_empty() {
         return Ok(());
     }
-    let db_path = db_dir(pack_dir);
+    let uri = uri.to_string();
+    let storage_options: Option<Vec<(String, String)>> = storage_options.map(|o| o.to_vec());
+    let docs = docs.to_vec();
+
     let task = async move {
-        let uri = db_path.to_string_lossy().to_string();
-        let db = lancedb::connect(&uri)
-            .execute()
-            .await
-            .context("failed to connect lancedb")?;
+        let db = connect_lancedb(&uri, storage_options.as_deref()).await?;
 
         let table = db
             .open_table(TABLE_NAME)
@@ -358,6 +395,15 @@ pub fn append_docs(
         rt.block_on(task)?;
     }
     Ok(())
+}
+
+pub fn append_docs(
+    pack_dir: &Path,
+    docs: &[SourceDoc],
+    embedding_dim: usize,
+) -> Result<()> {
+    let uri = db_dir(pack_dir).to_string_lossy().to_string();
+    append_docs_with_uri(&uri, None, docs, embedding_dim)
 }
 
 pub fn ensure_chunk_ids(docs: &mut [SourceDoc]) {
