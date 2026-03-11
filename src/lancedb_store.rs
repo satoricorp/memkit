@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 use arrow_array::cast::AsArray;
 use arrow_array::types::Float32Type;
-use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray, UInt32Array};
+use arrow_array::{Int64Array, RecordBatch, RecordBatchIterator, StringArray, UInt32Array};
 use arrow_schema::{DataType, Field, Schema};
 use chrono::Utc;
 use futures_util::TryStreamExt;
@@ -150,6 +150,114 @@ pub fn rebuild_tables(pack_dir: &Path, docs: &[SourceDoc], embedding_dim: usize)
     fs::create_dir_all(&db_path).context("failed to create lancedb directory")?;
     let uri = db_path.to_string_lossy().to_string();
     rebuild_tables_with_uri(&uri, None, docs, embedding_dim)
+}
+
+/// Load all chunks from the LanceDB table at the given URI. Returns empty vec if the table does not exist.
+pub fn load_all_docs_with_uri(
+    uri: &str,
+    storage_options: Option<&[(String, String)]>,
+    _embedding_dim: usize,
+) -> Result<Vec<SourceDoc>> {
+    let uri = uri.to_string();
+    let storage_options: Option<Vec<(String, String)>> = storage_options.map(|o| o.to_vec());
+
+    let task = async move {
+        let db = connect_lancedb(&uri, storage_options.as_deref()).await?;
+        let table = match db.open_table(TABLE_NAME).execute().await {
+            Ok(t) => t,
+            Err(_) => return Ok::<_, anyhow::Error>(Vec::new()),
+        };
+
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .select(Select::Columns(vec![
+                "chunk_id".to_string(),
+                "source_path".to_string(),
+                "chunk_index".to_string(),
+                "start_offset".to_string(),
+                "end_offset".to_string(),
+                "content".to_string(),
+                "content_hash".to_string(),
+                "embedding".to_string(),
+            ]))
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+
+        let mut docs = Vec::new();
+        for batch in &batches {
+            let chunk_id = batch
+                .column_by_name("chunk_id")
+                .ok_or_else(|| anyhow!("missing chunk_id"))?
+                .as_string::<i32>();
+            let source_path = batch
+                .column_by_name("source_path")
+                .ok_or_else(|| anyhow!("missing source_path"))?
+                .as_string::<i32>();
+            let chunk_index = batch
+                .column_by_name("chunk_index")
+                .ok_or_else(|| anyhow!("missing chunk_index"))?
+                .as_primitive::<arrow_array::types::UInt32Type>();
+            let start_offset = batch
+                .column_by_name("start_offset")
+                .ok_or_else(|| anyhow!("missing start_offset"))?
+                .as_primitive::<arrow_array::types::Int64Type>();
+            let end_offset = batch
+                .column_by_name("end_offset")
+                .ok_or_else(|| anyhow!("missing end_offset"))?
+                .as_primitive::<arrow_array::types::Int64Type>();
+            let content = batch
+                .column_by_name("content")
+                .ok_or_else(|| anyhow!("missing content"))?
+                .as_string::<i32>();
+            let content_hash = batch
+                .column_by_name("content_hash")
+                .ok_or_else(|| anyhow!("missing content_hash"))?
+                .as_string::<i32>();
+            let embedding_col = batch
+                .column_by_name("embedding")
+                .ok_or_else(|| anyhow!("missing embedding"))?
+                .as_fixed_size_list();
+
+            for i in 0..batch.num_rows() {
+                let emb = embedding_col.value(i);
+                let emb_prim = emb.as_primitive::<Float32Type>();
+                let embedding: Vec<f32> = emb_prim.values().to_vec();
+                docs.push(SourceDoc {
+                    chunk_id: chunk_id.value(i).to_string(),
+                    source_path: source_path.value(i).to_string(),
+                    chunk_index: chunk_index.value(i) as usize,
+                    start_offset: start_offset.value(i) as usize,
+                    end_offset: end_offset.value(i) as usize,
+                    content: content.value(i).to_string(),
+                    content_hash: content_hash.value(i).to_string(),
+                    embedding,
+                    indexed_at: Utc::now(),
+                });
+            }
+        }
+        Ok(docs)
+    };
+
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(task))
+    } else {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(task)
+    }
+}
+
+/// Load all chunks from the LanceDB table (local path). Returns empty vec if the table does not exist.
+pub fn load_all_docs(pack_dir: &Path, embedding_dim: usize) -> Result<Vec<SourceDoc>> {
+    let db_path = db_dir(pack_dir);
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let uri = db_path.to_string_lossy().to_string();
+    load_all_docs_with_uri(&uri, None, embedding_dim)
 }
 
 fn parse_hits_from_batches(
