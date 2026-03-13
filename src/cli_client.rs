@@ -1,3 +1,4 @@
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::Duration;
@@ -24,6 +25,7 @@ impl ServerGuard {
     }
 }
 
+#[derive(Clone)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
@@ -81,7 +83,7 @@ fn spawn_server(cfg: &ServerConfig, packs: &[PathBuf]) -> Result<Child> {
         .collect::<Vec<_>>()
         .join(",");
     let mut cmd = Command::new(&exe);
-    cmd.arg("serve")
+    cmd.arg("--headless-serve")
         .arg("--pack")
         .arg(&pack_paths)
         .arg("--host")
@@ -95,11 +97,16 @@ fn spawn_server(cfg: &ServerConfig, packs: &[PathBuf]) -> Result<Child> {
         .stderr(std::process::Stdio::null());
     let child = cmd.spawn().with_context(|| {
         format!(
-            "failed to start server ({}). try running `mk serve` manually or use a different port",
+            "failed to start server ({}). try a different port or ensure no other process is using it",
             exe.display()
         )
     })?;
     Ok(child)
+}
+
+fn find_free_port() -> Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0").context("find free port")?;
+    Ok(listener.local_addr().context("local_addr")?.port())
 }
 
 pub async fn ensure_server(cfg: &ServerConfig, packs: &[PathBuf]) -> Result<ServerGuard> {
@@ -118,10 +125,40 @@ pub async fn ensure_server(cfg: &ServerConfig, packs: &[PathBuf]) -> Result<Serv
     let _ = child.kill();
     let _ = child.wait();
     Err(anyhow!(
-        "server did not become healthy after {}s on {}:{}. run `mk serve` manually or check port",
+        "server did not become healthy after {}s on {}:{}. try a different port or ensure no other process is using it",
         (HEALTH_POLL_ATTEMPTS as u64 * HEALTH_POLL_INTERVAL_MS) / 1000,
         cfg.host,
         cfg.port
+    ))
+}
+
+/// Start a server on an ephemeral port (no reuse of existing server). Use for index so our process creates the pack.
+pub async fn ensure_server_standalone(
+    cfg: &ServerConfig,
+    packs: &[PathBuf],
+) -> Result<(ServerGuard, ServerConfig)> {
+    let port = find_free_port()?;
+    let standalone_cfg = ServerConfig {
+        host: cfg.host.clone(),
+        port,
+    };
+    let mut child = spawn_server(&standalone_cfg, packs)?;
+    for _ in 0..HEALTH_POLL_ATTEMPTS {
+        tokio::time::sleep(Duration::from_millis(HEALTH_POLL_INTERVAL_MS)).await;
+        if server_is_up(&standalone_cfg).await {
+            return Ok((
+                ServerGuard { child: Some(child) },
+                standalone_cfg,
+            ));
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(anyhow!(
+        "server did not become healthy after {}s on {}:{}",
+        (HEALTH_POLL_ATTEMPTS as u64 * HEALTH_POLL_INTERVAL_MS) / 1000,
+        standalone_cfg.host,
+        standalone_cfg.port
     ))
 }
 
@@ -257,35 +294,59 @@ pub async fn list(cfg: &ServerConfig, output_json: bool) -> Result<Value> {
     if !output_json {
         for p in &reg.packs {
             let default_marker = if p.default { " (default)" } else { "" };
+            let (lead, path_part) = if let Some(ref name) = p.name {
+                (name.as_str(), p.path.as_str())
+            } else {
+                (p.path.as_str(), "")
+            };
             if term::color_stdout() {
                 let cloud = if p.cloud { format!("{}", "[cloud]".cyan()) } else { format!("{}", "cloud".dimmed()) };
-                println!(
-                    "{} [local] {} {}",
-                    p.path.bold(),
-                    cloud,
-                    default_marker.dimmed()
-                );
+                if path_part.is_empty() {
+                    println!(
+                        "{} [local] {} {}",
+                        lead.bold(),
+                        cloud,
+                        default_marker.dimmed()
+                    );
+                } else {
+                    println!(
+                        "{}  {} [local] {} {}",
+                        lead.bold(),
+                        path_part.dimmed(),
+                        cloud,
+                        default_marker.dimmed()
+                    );
+                }
             } else {
                 let cloud = if p.cloud { "[cloud]" } else { "cloud" };
-                println!("{} [local] {} {}", p.path, cloud, default_marker);
+                if path_part.is_empty() {
+                    println!("{} [local] {} {}", lead, cloud, default_marker);
+                } else {
+                    println!("{}  {} [local] {} {}", lead, path_part, cloud, default_marker);
+                }
             }
         }
     }
     Ok(json!({"packs": reg.packs}))
 }
 
-pub async fn index(cfg: &ServerConfig, path: &str, dry_run: bool, output_json: bool) -> Result<Value> {
+pub async fn index(cfg: &ServerConfig, path: &str, name: Option<&str>, dry_run: bool, output_json: bool) -> Result<Value> {
     if dry_run {
         return Ok(json!({
             "dry_run": true,
             "would": "index",
             "path": path,
+            "name": name,
             "status": "skipped"
         }));
     }
     let client = http_client()?;
     let url = format!("{}/index", cfg.base_url());
-    let resp = client.post(url).json(&json!({"path": path})).send().await?;
+    let mut body = json!({"path": path});
+    if let Some(n) = name {
+        body["name"] = json!(n);
+    }
+    let resp = client.post(url).json(&body).send().await?;
     let status = resp.status();
     let body = resp.text().await?;
     if !status.is_success() {
