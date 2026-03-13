@@ -145,6 +145,50 @@ pub fn set_default(name_or_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove a pack from the registry by name or path. If it was the default, clears or reassigns default.
+/// Returns an error if the pack is not in the registry.
+pub fn remove_pack(name_or_path: &str) -> Result<()> {
+    let path = resolve_pack_by_name_or_path(name_or_path)?;
+    let normalized = path
+        .canonicalize()
+        .context("pack path no longer exists")?
+        .to_string_lossy()
+        .to_string();
+    if !remove_pack_by_path_inner(&normalized)? {
+        return Err(anyhow!("pack not in registry: {}", name_or_path));
+    }
+    Ok(())
+}
+
+/// Remove a pack from the registry by canonical path. Does not require the path to have pack artifacts.
+/// Returns true if a pack was removed, false if not in registry.
+pub fn remove_pack_by_path(path: &Path) -> Result<bool> {
+    let normalized = path
+        .canonicalize()
+        .context("path not found")?
+        .to_string_lossy()
+        .to_string();
+    remove_pack_by_path_inner(&normalized)
+}
+
+fn remove_pack_by_path_inner(normalized: &str) -> Result<bool> {
+    let mut reg = load_registry()?;
+    let idx = match reg.packs.iter().position(|p| p.path == normalized) {
+        Some(i) => i,
+        None => return Ok(false),
+    };
+    let was_default = reg.packs[idx].default;
+    reg.packs.remove(idx);
+    if was_default {
+        reg.default_path = reg.packs.first().map(|p| p.path.clone());
+        for p in &mut reg.packs {
+            p.default = reg.default_path.as_deref() == Some(p.path.as_str());
+        }
+    }
+    save_registry(&reg)?;
+    Ok(true)
+}
+
 /// Resolve a pack by name (registry) or by path. Returns the directory that contains the pack (parent of .memkit or pack root).
 pub fn resolve_pack_by_name_or_path(arg: &str) -> Result<PathBuf> {
     let reg = load_registry().unwrap_or_default();

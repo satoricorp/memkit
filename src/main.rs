@@ -91,7 +91,7 @@ use crate::cli_client::{ServerConfig, QueryArgs};
 use crate::pack::{
     add_source_root, copy_dir_into_sources, copy_file_into_sources, scrub_pack_from_dir,
 };
-use crate::registry::{load_registry, pack_dir_for_path, resolve_pack_by_name_or_path, set_default};
+use crate::registry::{load_registry, pack_dir_for_path, remove_pack, remove_pack_by_path, resolve_pack_by_name_or_path, set_default};
 use crate::server::run_server;
 
 struct ServeConfig {
@@ -101,7 +101,11 @@ struct ServeConfig {
 }
 
 enum CliCommand {
-    Add { path: String, pack: Option<String> },
+    Add {
+        local_path: Option<String>,
+        pack: Option<String>,
+        api_request: Option<serde_json::Value>,
+    },
     Remove { dir: Option<String> },
     Status { dir: Option<String> },
     List,
@@ -120,6 +124,7 @@ enum CliCommand {
         destination: Option<String>,
     },
     Use { pack: Option<String> },
+    Unregister { pack: Option<String> },
     Help,
 }
 
@@ -143,7 +148,7 @@ fn packs_for_command(cmd: &CliCommand) -> Result<Vec<PathBuf>> {
         CliCommand::Query { pack, .. } => vec![resolve_pack_root(pack.as_deref())?],
         CliCommand::Publish { pack, .. } => vec![resolve_pack_root(pack.as_deref())?],
         CliCommand::Use { pack } => vec![resolve_pack_root(pack.as_deref())?],
-        CliCommand::Remove { .. } | CliCommand::Schema { .. } | CliCommand::Help => {
+        CliCommand::Remove { .. } | CliCommand::Unregister { .. } | CliCommand::Schema { .. } | CliCommand::Help => {
             vec![resolve_pack_root(None)?]
         }
     };
@@ -255,6 +260,42 @@ fn parse_serve(args: &[String]) -> Result<Option<ServeConfig>> {
     Ok(Some(ServeConfig { packs, host, port }))
 }
 
+fn doc_type_for_url(url: &str) -> &'static str {
+    if url.contains("docs.google.com/spreadsheets/") {
+        "google_sheet"
+    } else if url.contains("docs.google.com/document/") {
+        "google_doc"
+    } else {
+        "url"
+    }
+}
+
+fn parse_add_command(j: &serde_json::Value, pack_override: Option<String>) -> Result<CliCommand> {
+    let obj = j.as_object().ok_or_else(|| anyhow!("--json must be a JSON object"))?;
+    let get_str = |k: &str| obj.get(k).and_then(serde_json::Value::as_str).map(String::from);
+    let has_docs = j.get("documents").and_then(serde_json::Value::as_array).map(|a| !a.is_empty()).unwrap_or(false);
+    let has_conv = j.get("conversation").and_then(serde_json::Value::as_array).map(|a| !a.is_empty()).unwrap_or(false);
+    if has_docs || has_conv {
+        for doc in j.get("documents").and_then(serde_json::Value::as_array).into_iter().flatten() {
+            if let Some(v) = doc.get("value").and_then(serde_json::Value::as_str) {
+                crate::validate::reject_control_chars(v)?;
+            }
+        }
+        return Ok(CliCommand::Add {
+            local_path: None,
+            pack: pack_override.or_else(|| get_str("pack")).or_else(|| get_str("path")),
+            api_request: Some(j.clone()),
+        });
+    }
+    let path = get_str("path").ok_or_else(|| anyhow!("--json must include \"path\" (local path) or \"documents\"/\"conversation\" (API add)"))?;
+    crate::validate::validate_path(&path)?;
+    Ok(CliCommand::Add {
+        local_path: Some(path),
+        pack: pack_override.or_else(|| get_str("pack")),
+        api_request: None,
+    })
+}
+
 /// Build a CliCommand from a single JSON object (used for `mk --json '{...}'`).
 fn cli_command_from_json(cmd: &str, j: &serde_json::Value) -> Result<CliCommand> {
     let obj = j.as_object().ok_or_else(|| anyhow!("--json must be a JSON object"))?;
@@ -263,11 +304,7 @@ fn cli_command_from_json(cmd: &str, j: &serde_json::Value) -> Result<CliCommand>
     let get_bool = |k: &str| obj.get(k).and_then(serde_json::Value::as_bool);
 
     match cmd {
-        "add" => {
-            let path = get_str("path").ok_or_else(|| anyhow!("--json must include \"path\""))?;
-            crate::validate::validate_path(&path)?;
-            Ok(CliCommand::Add { path, pack: get_str("pack") })
-        }
+        "add" => parse_add_command(j, None),
         "remove" => {
             let dir = get_str("dir");
             if let Some(ref d) = dir {
@@ -304,6 +341,7 @@ fn cli_command_from_json(cmd: &str, j: &serde_json::Value) -> Result<CliCommand>
         }),
         "schema" => Ok(CliCommand::Schema { command: get_str("schema") }),
         "use" => Ok(CliCommand::Use { pack: get_str("pack") }),
+        "unregister" => Ok(CliCommand::Unregister { pack: get_str("pack") }),
         "help" | "--help" | "-h" => Ok(CliCommand::Help),
         other => Err(anyhow!("unknown command: {}. run `mk help` for usage", other)),
     }
@@ -328,32 +366,40 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
     match args[0].as_str() {
         "add" => {
             let (json_val, rest) = extract_json_from_args(&args[1..]);
-            if let Some(j) = json_val {
-                let path = j
-                    .get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .map(String::from)
-                    .ok_or_else(|| anyhow!("--json must include \"path\""))?;
-                let pack = j.get("pack").and_then(serde_json::Value::as_str).map(String::from);
-                crate::validate::validate_path(&path)?;
-                return Ok(CliCommand::Add { path, pack });
-            }
-            let path = rest
-                .first()
-                .cloned()
-                .ok_or_else(|| anyhow!("usage: mk add <path> [--pack <dir>] or mk add --json '{{\"path\":\"...\"}}'"))?;
-            crate::validate::validate_path(&path)?;
-            let mut pack = None;
-            let mut i = 1usize;
+            let mut pack_from_rest = None;
+            let mut i = 0usize;
             while i < rest.len() {
                 if rest[i] == "--pack" && rest.get(i + 1).is_some() {
-                    pack = rest.get(i + 1).cloned();
+                    pack_from_rest = rest.get(i + 1).cloned();
                     i += 2;
                 } else {
                     i += 1;
                 }
             }
-            Ok(CliCommand::Add { path, pack })
+            if let Some(j) = json_val {
+                return parse_add_command(&j, pack_from_rest);
+            }
+            let arg = rest
+                .first()
+                .cloned()
+                .ok_or_else(|| anyhow!("usage: mk add <path-or-url> [--pack <dir>] or mk add --json '{{\"path\":\"...\"}}' or mk add --json '{{\"documents\":[...]}}'"))?;
+            if arg.starts_with("http://") || arg.starts_with("https://") {
+                let doc_type = doc_type_for_url(&arg);
+                let api_request = serde_json::json!({
+                    "documents": [{ "type": doc_type, "value": arg }]
+                });
+                return Ok(CliCommand::Add {
+                    local_path: None,
+                    pack: pack_from_rest,
+                    api_request: Some(api_request),
+                });
+            }
+            crate::validate::validate_path(&arg)?;
+            Ok(CliCommand::Add {
+                local_path: Some(arg),
+                pack: pack_from_rest,
+                api_request: None,
+            })
         }
         "remove" => {
             let (json_val, rest) = extract_json_from_args(&args[1..]);
@@ -545,6 +591,22 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
             }
             Ok(CliCommand::Use { pack })
         }
+        "unregister" => {
+            let mut pack = None;
+            let mut i = 1usize;
+            while i < args.len() {
+                if args[i] == "--pack" && args.get(i + 1).is_some() {
+                    pack = args.get(i + 1).cloned();
+                    i += 2;
+                } else if !args[i].starts_with('-') {
+                    pack = Some(args[i].clone());
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            }
+            Ok(CliCommand::Unregister { pack })
+        }
         "help" | "--help" | "-h" => Ok(CliCommand::Help),
         other => Err(anyhow!(
             "unknown command: {}. run `mk help` for usage",
@@ -553,7 +615,7 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
     }
 }
 
-const SCHEMA_COMMANDS: &[&str] = &["add", "remove", "status", "index", "graph", "query", "use"];
+const SCHEMA_COMMANDS: &[&str] = &["add", "remove", "status", "index", "graph", "query", "use", "unregister"];
 
 fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
     Some(match cmd {
@@ -562,10 +624,17 @@ fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
             "input": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path to file or directory to add"},
-                    "pack": {"type": "string", "description": "Pack name or path (optional)"}
-                },
-                "required": ["path"]
+                    "path": {"type": "string", "description": "Local path to add, or pack path when using documents/conversation"},
+                    "pack": {"type": "string", "description": "Pack name or path (optional)"},
+                    "documents": {
+                        "type": "array",
+                        "description": "API add: list of { type: url|content|google_doc|google_sheet, value: string }"
+                    },
+                    "conversation": {
+                        "type": "array",
+                        "description": "API add: list of { role, content }"
+                    }
+                }
             }
         }),
         "remove" => serde_json::json!({
@@ -629,6 +698,16 @@ fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                 }
             }
         }),
+        "unregister" => serde_json::json!({
+            "command": "unregister",
+            "input": {
+                "type": "object",
+                "properties": {
+                    "pack": {"type": "string", "description": "Pack name or path to remove from registry"}
+                },
+                "required": ["pack"]
+            }
+        }),
         _ => return None,
     })
 }
@@ -672,7 +751,8 @@ fn print_help() {
     println!();
     let commands = [
         "  mk --json '{\"command\":\"<cmd>\", ...}'",
-        "  mk add <path> [--pack <name-or-path>]",
+        "  mk add <path-or-url> [--pack <name-or-path>]",
+        "  mk add --json '{\"documents\":[{\"type\":\"url\",\"value\":\"...\"}],\"path\":\"...\"}'",
         "  mk remove [dir]",
         "  mk status [dir]",
         "  mk list",
@@ -681,6 +761,7 @@ fn print_help() {
         "  mk query <text> [--top-k N] [--no-rerank] [--pack <name-or-path>] [--raw]",
         "  mk publish [--pack <name-or-path>] [--destination s3://bucket/prefix]",
         "  mk use [name-or-path]",
+        "  mk unregister <name-or-path>",
         "  mk schema [command]",
     ];
     for cmd in commands {
@@ -731,11 +812,43 @@ async fn main() -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&out)?);
                         return Ok(());
                     }
-                    scrub_pack_from_dir(&target)?;
+                    #[cfg(feature = "helix")]
+                    crate::helix_store::remove_helix_for_pack(&target)?;
+                    let was_in_registry = remove_pack_by_path(&target)?;
+                    match scrub_pack_from_dir(&target) {
+                        Ok(()) => {
+                            if crate::term::color_stdout() {
+                                println!("{} scrubbed from {}", "Memory pack removed".green(), target.display());
+                            } else {
+                                println!("Memory pack removed from {}", target.display());
+                            }
+                        }
+                        Err(e) => {
+                            if was_in_registry {
+                                if crate::term::color_stdout() {
+                                    println!("{} {} (no pack artifacts in directory)", "Pack removed from registry".green(), target.display());
+                                } else {
+                                    println!("Pack removed from registry {} (no pack artifacts in directory)", target.display());
+                                }
+                            } else {
+                                return Err(e);
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                CliCommand::Unregister { pack } => {
+                    let name_or_path = pack
+                        .as_deref()
+                        .ok_or_else(|| anyhow!("usage: mk unregister <name-or-path>"))?;
+                    let pack_root = resolve_pack_by_name_or_path(name_or_path)?;
+                    #[cfg(feature = "helix")]
+                    crate::helix_store::remove_helix_for_pack(&pack_root)?;
+                    remove_pack(name_or_path)?;
                     if crate::term::color_stdout() {
-                        println!("{} scrubbed from {}", "Memory pack removed".green(), target.display());
+                        println!("{} {}", "Pack removed from registry".green(), name_or_path);
                     } else {
-                        println!("Memory pack removed from {}", target.display());
+                        println!("Pack removed from registry {}", name_or_path);
                     }
                     return Ok(());
                 }
@@ -789,56 +902,78 @@ async fn main() -> Result<()> {
                 Output(serde_json::Value),
             }
             let result: Result<CommandOut> = match cmd {
-                CliCommand::Add { path, pack } => {
-                    if ctx.dry_run {
-                        let pack_display = pack.as_deref().unwrap_or("(default)");
-                        let out = serde_json::json!({
-                            "dry_run": true,
-                            "would": "add",
-                            "path": path,
-                            "pack": pack_display,
-                            "status": "skipped"
-                        });
-                        println!("{}", serde_json::to_string_pretty(&out)?);
-                        Ok(CommandOut::Done)
+                CliCommand::Add { local_path, pack, api_request } => {
+                    if let Some(ref body) = api_request {
+                        if ctx.dry_run {
+                            let out = serde_json::json!({
+                                "dry_run": true,
+                                "would": "POST /add",
+                                "body": body,
+                                "status": "skipped"
+                            });
+                            println!("{}", serde_json::to_string_pretty(&out)?);
+                            Ok(CommandOut::Done)
+                        } else {
+                            let pack_root = resolve_pack_root(pack.as_deref())?;
+                            let mut body = body.clone();
+                            if let Some(obj) = body.as_object_mut() {
+                                obj.insert("path".to_string(), serde_json::Value::String(pack_root.to_string_lossy().to_string()));
+                            }
+                            let out = cli_client::add(&effective_cfg, &body).await?;
+                            Ok(CommandOut::Output(out))
+                        }
                     } else {
-                        let source = PathBuf::from(&path)
-                            .canonicalize()
-                            .with_context(|| format!("path not found: {}", path))?;
-                        let pack_root = resolve_pack_root(pack.as_deref())?;
-                        let pack_dir = pack_dir_for_path(&pack_root);
-                        if !pack_dir.join("manifest.json").exists() {
-                            anyhow::bail!(
-                                "no memory pack at {}. run `mk index {}` first",
-                                pack_root.display(),
-                                pack_root.display()
-                            );
-                        }
-                        let (dest, pack_relative) = if source.is_dir() {
-                            let name = source
-                                .file_name()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "unnamed".to_string());
-                            let d = copy_dir_into_sources(&source, &pack_dir, &name)?;
-                            (d, format!("sources/{}", name))
+                        let path = local_path.as_deref().unwrap();
+                        if ctx.dry_run {
+                            let pack_display = pack.as_deref().unwrap_or("(default)");
+                            let out = serde_json::json!({
+                                "dry_run": true,
+                                "would": "add",
+                                "path": path,
+                                "pack": pack_display,
+                                "status": "skipped"
+                            });
+                            println!("{}", serde_json::to_string_pretty(&out)?);
+                            Ok(CommandOut::Done)
                         } else {
-                            let d = copy_file_into_sources(&source, &pack_dir)?;
-                            (d, "sources/_files".to_string())
-                        };
-                        add_source_root(&pack_dir, &pack_relative)?;
-                        if crate::term::color_stdout() {
-                            println!(
-                                "{} {} -> {}",
-                                "Copied".green(),
-                                source.display(),
-                                dest.display()
-                            );
-                        } else {
-                            println!("Copied {} -> {}", source.display(), dest.display());
+                            let source = PathBuf::from(path)
+                                .canonicalize()
+                                .with_context(|| format!("path not found: {}", path))?;
+                            let pack_root = resolve_pack_root(pack.as_deref())?;
+                            let pack_dir = pack_dir_for_path(&pack_root);
+                            if !pack_dir.join("manifest.json").exists() {
+                                anyhow::bail!(
+                                    "no memory pack at {}. run `mk index {}` first",
+                                    pack_root.display(),
+                                    pack_root.display()
+                                );
+                            }
+                            let (dest, pack_relative) = if source.is_dir() {
+                                let name = source
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "unnamed".to_string());
+                                let d = copy_dir_into_sources(&source, &pack_dir, &name)?;
+                                (d, format!("sources/{}", name))
+                            } else {
+                                let d = copy_file_into_sources(&source, &pack_dir)?;
+                                (d, "sources/_files".to_string())
+                            };
+                            add_source_root(&pack_dir, &pack_relative)?;
+                            if crate::term::color_stdout() {
+                                println!(
+                                    "{} {} -> {}",
+                                    "Copied".green(),
+                                    source.display(),
+                                    dest.display()
+                                );
+                            } else {
+                                println!("Copied {} -> {}", source.display(), dest.display());
+                            }
+                            let out = cli_client::index(&effective_cfg, pack_root.to_string_lossy().as_ref(), None, false, ctx.output_format == OutputFormat::Json).await?;
+                            cli_client::poll_until_index_done(&effective_cfg, pack_root.to_string_lossy().as_ref()).await?;
+                            Ok(CommandOut::Output(out))
                         }
-                        let out = cli_client::index(&effective_cfg, pack_root.to_string_lossy().as_ref(), None, false, ctx.output_format == OutputFormat::Json).await?;
-                        cli_client::poll_until_index_done(&effective_cfg, pack_root.to_string_lossy().as_ref()).await?;
-                        Ok(CommandOut::Output(out))
                     }
                 }
                 CliCommand::Status { dir } => {
@@ -924,7 +1059,7 @@ async fn main() -> Result<()> {
                         Ok(CommandOut::Output(out))
                     }
                 }
-                CliCommand::Help | CliCommand::Remove { .. } | CliCommand::Schema { .. } | CliCommand::Use { .. } => unreachable!(),
+                CliCommand::Help | CliCommand::Remove { .. } | CliCommand::Schema { .. } | CliCommand::Use { .. } | CliCommand::Unregister { .. } => unreachable!(),
             };
             guard.shutdown()?;
             let command_out = result?;
