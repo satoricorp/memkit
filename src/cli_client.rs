@@ -540,9 +540,7 @@ pub async fn list(cfg: &ServerConfig, output_json: bool) -> Result<Value> {
                 let counts_suffix = format!("{} vectors, {} entities, {} relationships", vector_count, entities, relationships);
                 let active_obj = active_job.and_then(Value::as_object);
                 let is_remove_job_for_this_pack = active_obj.as_ref().and_then(|o| o.get("job_type").and_then(Value::as_str)) == Some("remove_pack")
-                    && active_obj.as_ref().and_then(|o| o.get("pack_path").and_then(Value::as_str)).map_or(false, |job_path| {
-                        job_path == p.path || p.path.strip_prefix(job_path).map_or(false, |s| s.is_empty() || s == "/.memkit")
-                    });
+                    && active_obj.as_ref().and_then(|o| o.get("pack_path").and_then(Value::as_str)).as_ref() == Some(&p.path);
                 let status_line = if is_remove_job_for_this_pack {
                     "removing...".to_string()
                 } else if let Some(ref obj) = active_obj {

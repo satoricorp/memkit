@@ -867,65 +867,8 @@ async fn main() -> Result<()> {
                         if !confirmed {
                             return Ok(());
                         }
-                        // Spawn background child and return immediately.
-                        let exe = std::env::current_exe().context("current executable")?;
-                        let path_str = target.display().to_string();
-                        let child = std::process::Command::new(&exe)
-                            .arg("remove")
-                            .arg("--yes")
-                            .arg(&path_str)
-                            .stdin(std::process::Stdio::null())
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .spawn()
-                            .context("spawn background remove")?;
-                        let pid = child.id();
-                        if crate::term::color_stdout() {
-                            println!("{} (pid {})", "Removal running in background".green(), pid);
-                        } else {
-                            println!("Removal running in background (pid {})", pid);
-                        }
-                        return Ok(());
                     }
-                    let spinner = if crate::term::color_stdout() {
-                        let pb = ProgressBar::new_spinner();
-                        pb.set_message("Removing…");
-                        pb.enable_steady_tick(Duration::from_millis(80));
-                        Some(pb)
-                    } else {
-                        None
-                    };
-                    let result = (|| -> Result<()> {
-                        #[cfg(feature = "helix")]
-                        crate::helix_store::remove_helix_for_pack(&target)?;
-                        let was_in_registry = remove_pack_by_path(&target)?;
-                        match scrub_pack_from_dir(&target) {
-                            Ok(()) => {
-                                if crate::term::color_stdout() {
-                                    println!("{} scrubbed from {}", "Memory pack removed".green(), target.display());
-                                } else {
-                                    println!("Memory pack removed from {}", target.display());
-                                }
-                            }
-                            Err(e) => {
-                                if was_in_registry {
-                                    if crate::term::color_stdout() {
-                                        println!("{} {} (no pack artifacts in directory)", "Pack removed from registry".green(), target.display());
-                                    } else {
-                                        println!("Pack removed from registry {} (no pack artifacts in directory)", target.display());
-                                    }
-                                } else {
-                                    return Err(e);
-                                }
-                            }
-                        }
-                        Ok(())
-                    })();
-                    if let Some(pb) = spinner {
-                        pb.finish_and_clear();
-                    }
-                    result?;
-                    return Ok(());
+                    // Fall through to use server remove job (ensure_server + POST /remove).
                 }
                 CliCommand::Use { pack } => {
                     let reg = load_registry()?;
@@ -977,6 +920,28 @@ async fn main() -> Result<()> {
                 Output(serde_json::Value),
             }
             let result: Result<CommandOut> = match cmd {
+                CliCommand::Remove { dir, yes: _ } => {
+                    let target = if let Some(name_or_path) = dir.as_deref() {
+                        resolve_pack_by_name_or_path(name_or_path)?
+                    } else {
+                        std::env::current_dir()
+                            .unwrap_or_else(|_| PathBuf::from("."))
+                            .canonicalize()
+                            .with_context(|| "path not found: current directory")?
+                    };
+                    let path_str = target.display().to_string();
+                    let out = cli_client::remove(&effective_cfg, &path_str).await?;
+                    if ctx.output_format != OutputFormat::Json {
+                        if let Some(job_id) = out.get("job").and_then(|j| j.get("id")).and_then(|v| v.as_str()) {
+                            if crate::term::color_stdout() {
+                                println!("{} ({}). Run 'mk status' to check progress.", "Removal started".green(), job_id);
+                            } else {
+                                println!("Removal started ({}). Run 'mk status' to check progress.", job_id);
+                            }
+                        }
+                    }
+                    Ok(CommandOut::Output(out))
+                }
                 CliCommand::Add { local_path, pack, api_request } => {
                     if let Some(ref body) = api_request {
                         if ctx.dry_run {
