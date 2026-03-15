@@ -899,6 +899,54 @@ async fn index_now(
     })))
 }
 
+async fn remove_now(
+    State(state): State<AppState>,
+    Json(req): Json<RemoveRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let path = req
+        .path
+        .as_deref()
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": { "code": "PATH_REQUIRED", "message": "remove requires path" }
+            })),
+        ))?;
+    let dir = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":{"code":"PATH_INVALID","message":format!("path not accessible: {}", e)}})),
+            )
+        })?;
+    let pack_dir = if dir.join(".memkit/manifest.json").exists() {
+        dir.join(".memkit")
+    } else if dir.join("manifest.json").exists() {
+        dir
+    } else {
+        pack_dir_for_path(&dir)
+    };
+    if !pack_dir.join("manifest.json").exists() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": { "code": "PACK_NOT_FOUND", "message": "No pack found at path" }
+            })),
+        ));
+    }
+    let pack_root = pack_dir
+        .parent()
+        .unwrap_or_else(|| pack_dir.as_path())
+        .to_path_buf();
+    let job = enqueue_remove_job(&state, pack_root.to_string_lossy().to_string()).await;
+    start_next_job_if_idle(state.clone());
+    Ok(Json(json!({
+        "status": "accepted",
+        "job": job
+    })))
+}
+
 async fn enqueue_index_job(
     state: &AppState,
     trigger: &str,
@@ -927,6 +975,29 @@ async fn enqueue_index_job(
     json!(record)
 }
 
+async fn enqueue_remove_job(state: &AppState, pack_root: String) -> Value {
+    let mut jobs = state.jobs.lock().await;
+    let id = format!("job-{}", jobs.next_id);
+    jobs.next_id += 1;
+    let record = JobRecord {
+        id: id.clone(),
+        job_type: JobType::RemovePack,
+        state: JobState::Queued,
+        trigger: "manual_remove".to_string(),
+        pack_path: Some(pack_root),
+        cleanup_after_index: None,
+        add_payload: None,
+        enqueued_at: Utc::now(),
+        started_at: None,
+        finished_at: None,
+        result: None,
+        error: None,
+    };
+    jobs.queue.push_back(id);
+    jobs.jobs.push(record.clone());
+    json!(record)
+}
+
 fn start_next_job_if_idle(state: AppState) {
     tokio::spawn(async move {
         enum JobWork {
@@ -938,6 +1009,7 @@ fn start_next_job_if_idle(state: AppState) {
                 pack_path: PathBuf,
                 items: Vec<(String, String)>,
             },
+            RemovePack { pack_root: PathBuf },
         }
         let (maybe_job_id, work) = {
             let mut jobs = state.jobs.lock().await;
@@ -954,6 +1026,14 @@ fn start_next_job_if_idle(state: AppState) {
                 job.started_at = Some(Utc::now());
             }
             let work = match job.as_ref() {
+                Some(j) if matches!(j.job_type, JobType::RemovePack) => {
+                    let pack_root = j
+                        .pack_path
+                        .as_ref()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(PathBuf::new);
+                    JobWork::RemovePack { pack_root }
+                }
                 Some(j) if matches!(j.job_type, JobType::AddDocuments) => {
                     let pack_path = j.pack_path.as_ref().map(PathBuf::from).unwrap_or_else(PathBuf::new);
                     let items: Vec<(String, String)> = j
@@ -1031,6 +1111,21 @@ fn start_next_job_if_idle(state: AppState) {
                         "status": "ok",
                         "chunks_added": total_chunks
                     }))
+                })
+                .await;
+                match run_result {
+                    Ok(Ok(v)) => Ok((v, None)),
+                    Ok(Err(e)) => Err((e, None)),
+                    Err(e) => Err((anyhow::anyhow!("job task failed: {}", e), None)),
+                }
+            }
+            JobWork::RemovePack { pack_root } => {
+                let run_result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+                    #[cfg(feature = "store-helix-only")]
+                    remove_helix_for_pack(&pack_root)?;
+                    remove_pack_by_path(&pack_root)?;
+                    scrub_pack_from_dir(&pack_root)?;
+                    Ok(json!({ "status": "removed" }))
                 })
                 .await;
                 match run_result {
