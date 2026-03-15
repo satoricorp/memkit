@@ -9,3 +9,4 @@
 /.fastembed_cache
 /.local-run
 /.local-data
+.env
