@@ -1,0 +1,14 @@
+{
+  "home": {
+    "productsEyebrow": "Products",
+    "productsTitle": "Launch with modular product blocks",
+    "productsSubtitle": "Use JSON to define products, positioning, and CTAs. Each block renders automatically.",
+    "featuresEyebrow": "Features",
+    "testimonialsEyebrow": "Testimonials",
+    "readyEyebrow": "Ready"
+  },
+  "dashboard": {
+    "recentActivityTitle": "Recent activity",
+    "quickActionsTitle": "Quick actions"
+  }
+}

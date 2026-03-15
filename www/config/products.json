@@ -1,0 +1,90 @@
+{
+  "products": [
+    {
+      "id": "codex",
+      "name": "Codex",
+      "tagline": "Your config-first control center",
+      "description": "Curate product data, marketing copy, and dashboard modules from a single JSON surface.",
+      "badge": "Core",
+      "bullets": [
+        "Structured content registry",
+        "Instant theme swapping",
+        "Audit-friendly updates"
+      ],
+      "cta": { "label": "Explore Codex", "href": "/signup" }
+    },
+    {
+      "id": "signal",
+      "name": "Signal",
+      "tagline": "Metrics that stay in sync",
+      "description": "Keep KPIs, highlights, and product usage in one place for every stakeholder.",
+      "badge": "Analytics",
+      "bullets": [
+        "Dashboard-ready metrics",
+        "Weekly summaries",
+        "Instant share links"
+      ],
+      "cta": { "label": "View metrics", "href": "/dashboard" }
+    },
+    {
+      "id": "studio",
+      "name": "Studio",
+      "tagline": "Launch campaigns in hours",
+      "description": "Spin up landing pages, pricing blocks, and CTA stacks without rewriting components.",
+      "badge": "Marketing",
+      "bullets": [
+        "Reusable campaign layouts",
+        "CTA sequencing",
+        "Campaign snapshots"
+      ],
+      "cta": { "label": "Plan a launch", "href": "/signup" }
+    }
+  ],
+  "pricing": {
+    "eyebrow": "Pricing",
+    "title": "Plans that scale with your product",
+    "subtitle": "Start with a single product page. Expand into dashboards and multiple brands when you are ready.",
+    "plans": [
+      {
+        "name": "Launch",
+        "price": "$49",
+        "cadence": "per month",
+        "description": "Best for new products and MVPs.",
+        "highlighted": false,
+        "features": [
+          "Landing page config",
+          "Single product catalog",
+          "Auth-ready flows"
+        ],
+        "cta": { "label": "Start Launch", "href": "/signup" }
+      },
+      {
+        "name": "Scale",
+        "price": "$129",
+        "cadence": "per month",
+        "description": "For growing teams with multiple products.",
+        "highlighted": true,
+        "features": [
+          "Multi-product catalog",
+          "Dashboard modules",
+          "Brand theming"
+        ],
+        "cta": { "label": "Choose Scale", "href": "/signup" }
+      },
+      {
+        "name": "Enterprise",
+        "price": "Custom",
+        "cadence": "annual",
+        "description": "Security, compliance, and dedicated support.",
+        "highlighted": false,
+        "features": [
+          "Dedicated workspace",
+          "Advanced permissions",
+          "Priority onboarding"
+        ],
+        "cta": { "label": "Talk to sales", "href": "mailto:sales@yourcompany.com" }
+      }
+    ],
+    "disclaimer": "All plans include the core Codex configuration engine."
+  }
+}

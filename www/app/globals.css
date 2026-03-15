@@ -1,0 +1,157 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@variant dark (&:is(.dark *));
+
+:root {
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --primary: #0f172a;
+  --primary-foreground: #f8fafc;
+  --input: #ffffff;
+  --border: #dbe3ef;
+  --secondary: #eef3fa;
+  --secondary-foreground: #0f172a;
+  --muted: #f1f5f9;
+  --muted-foreground: #475569;
+  --accent: #3b82f6;
+  --accent-foreground: #ffffff;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+  --ring: #3b82f6;
+  --brand: #5b8dff;
+}
+
+.dark {
+  --background: #090d13;
+  --foreground: #e6edf3;
+  --primary: #e6edf3;
+  --primary-foreground: #090d13;
+  --input: #101722;
+  --border: #223045;
+  --secondary: #0e141f;
+  --secondary-foreground: #d8e2ee;
+  --muted: #111927;
+  --muted-foreground: #8ea1b5;
+  --accent: #6a97ff;
+  --accent-foreground: #f8fbff;
+  --popover: #0d1320;
+  --popover-foreground: #e6edf3;
+  --ring: #8ab0ff;
+  --brand: #6a97ff;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-ring: var(--ring);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-pixel: var(--font-geist-pixel-square);
+  --font-flauta: var(--font-flauta);
+  --font-apple-garamond: var(--font-apple-garamond);
+  --font-fk-grotesk-black: var(--font-fk-grotesk-black);
+  --animate-shiny-text: shiny-text 8s infinite;
+  @keyframes shiny-text {
+  0%, 90%, 100% {
+    background-position: calc(-100% - var(--shiny-width)) 0;
+    }
+  30%, 60% {
+    background-position: calc(100% + var(--shiny-width)) 0;
+    }
+  }
+}
+
+body {
+  position: relative;
+  min-height: 100vh;
+  background: radial-gradient(circle at top, rgba(148, 163, 184, 0.12), transparent 46%),
+    radial-gradient(circle at 20% 20%, rgba(91, 141, 255, 0.06), transparent 52%),
+    var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), sans-serif;
+}
+
+body::before {
+  content: none;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+@layer utilities {
+  .font-display {
+    font-family: var(--font-apple-garamond), serif;
+  }
+  .font-brand {
+    font-family: var(--font-fk-grotesk-black), sans-serif;
+  }
+  .font-mono-soft {
+    font-family: var(--font-geist-mono), monospace;
+  }
+  .font-pixel {
+    font-family: var(--font-geist-pixel-square), monospace;
+  }
+  .bg-grid {
+    background-image: linear-gradient(to right, rgba(148, 163, 184, 0.14) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(148, 163, 184, 0.14) 1px, transparent 1px);
+    background-size: 56px 56px;
+  }
+  .bg-noise-gradient {
+    position: relative;
+    isolation: isolate;
+    background-color: var(--background);
+    background-image:
+      radial-gradient(circle at top left, rgba(106, 151, 255, 0.08), transparent 46%),
+      radial-gradient(circle at bottom right, rgba(148, 163, 184, 0.06), transparent 54%);
+  }
+  .frame-corners-top,
+  .frame-corners-bottom {
+    position: relative;
+  }
+  .frame-corners-top::before,
+  .frame-corners-bottom::after {
+    content: "";
+    position: absolute;
+    left: -1px;
+    right: -1px;
+    height: 6px;
+    pointer-events: none;
+  }
+  .frame-corners-top::before {
+    top: -1px;
+    background:
+      linear-gradient(135deg, var(--border) 0 50%, transparent 50%) left top / 6px 6px no-repeat,
+      linear-gradient(225deg, var(--border) 0 50%, transparent 50%) right top / 6px 6px no-repeat;
+  }
+  .frame-corners-bottom::after {
+    bottom: -1px;
+    background:
+      linear-gradient(45deg, var(--border) 0 50%, transparent 50%) left bottom / 6px 6px no-repeat,
+      linear-gradient(-45deg, var(--border) 0 50%, transparent 50%) right bottom / 6px 6px no-repeat;
+  }
+}
