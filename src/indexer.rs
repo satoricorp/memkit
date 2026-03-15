@@ -111,6 +111,7 @@ fn to_source_configs(pack_dir: &Path, sources: &[PathBuf]) -> Vec<SourceConfig> 
         .collect()
 }
 
+#[allow(unused_variables)]
 pub fn run_index(
     pack_dir: &Path,
     sources: &[PathBuf],
@@ -137,6 +138,7 @@ pub fn run_index(
         .drain(..)
         .map(|s| (s.file_path.clone(), s))
         .collect();
+    #[allow(unused_variables)]
     let previous_paths: HashSet<String> = state_by_path.keys().cloned().collect();
 
     let mut scanned = 0usize;

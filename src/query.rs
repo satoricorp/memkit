@@ -44,6 +44,7 @@ pub fn run_query(
     q: &str,
     top_k: usize,
     use_reranker: bool,
+    #[allow(unused_variables)]
     graph_name_override: Option<&str>,
     path_filter: Option<&str>,
 ) -> Result<QueryResponse> {
