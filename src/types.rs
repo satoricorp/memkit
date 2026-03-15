@@ -56,6 +56,14 @@ pub struct SourceDoc {
     pub indexed_at: DateTime<Utc>,
 }
 
+/// Graph relation (entity -> relation -> target). Used by ontology and optionally by graph store.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphRelation {
+    pub source: String,
+    pub relation: String,
+    pub target: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryHit {
     pub score: f32,

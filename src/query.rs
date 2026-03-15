@@ -2,13 +2,17 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
 use crate::embed::provider_from_name;
+#[cfg(feature = "lance-falkor")]
 use crate::falkor_store::{
     graph_name_for_pack, graph_name_from_env, query_chunks as query_falkor_chunks, socket_from_env,
 };
+#[cfg(feature = "lance-falkor")]
 use crate::lancedb_store::{hybrid_query_with_uri, load_all_docs_with_uri};
+#[cfg(feature = "helix")]
+use crate::helix_store::{helix_hybrid_query, helix_load_all_docs, helix_pack_path_for_local};
 use crate::pack_location::PackLocation;
 use crate::pack::load_manifest_from_loc;
 use crate::rerank::{try_create_reranker, DEFAULT_RERANKER_MODEL};
@@ -45,17 +49,27 @@ pub fn run_query(
 ) -> Result<QueryResponse> {
     let total_start = Instant::now();
     let manifest = load_manifest_from_loc(loc)?;
-    let index_docs = load_all_docs_with_uri(
-        &loc.lancedb_uri(),
-        loc.storage_options(),
-        manifest.embedding.dimension,
-    )?;
+    let dim = manifest.embedding.dimension;
+
+    let index_docs: Vec<_> = {
+        #[cfg(feature = "store-helix-only")]
+        {
+            let pack_path = loc
+                .as_path()
+                .ok_or_else(|| anyhow!("Helix-only build supports local packs only"))?;
+            helix_load_all_docs(&helix_pack_path_for_local(pack_path), dim)?
+        }
+        #[cfg(all(not(feature = "store-helix-only"), feature = "lance-falkor"))]
+        {
+            load_all_docs_with_uri(&loc.lancedb_uri(), loc.storage_options(), dim)?
+        }
+    };
 
     let embed_start = Instant::now();
     let mut provider = provider_from_name(
         &manifest.embedding.provider,
         &manifest.embedding.model,
-        manifest.embedding.dimension,
+        dim,
     )
     .or_else(|e| {
         if manifest.embedding.provider == "fastembed" {
@@ -63,11 +77,7 @@ pub fn run_query(
                 "warning: fastembed query init failed ({}), falling back to hash embeddings",
                 e
             ));
-            provider_from_name(
-                "hash",
-                &manifest.embedding.model,
-                manifest.embedding.dimension,
-            )
+            provider_from_name("hash", &manifest.embedding.model, dim)
         } else {
             Err(e)
         }
@@ -76,58 +86,103 @@ pub fn run_query(
     let embed_ms = embed_start.elapsed().as_millis();
 
     let retrieval_start = Instant::now();
-    let lancedb_uri = loc.lancedb_uri();
-    let storage_options = loc.storage_options().map(|o| o.to_vec());
-    let query_text = q.to_string();
-    let query_embedding = q_embedding.clone();
-    let falkor_socket = socket_from_env();
-    let graph_name = graph_name_override
-        .map(String::from)
-        .unwrap_or_else(graph_name_from_env);
-    let top_for_backend = top_k.saturating_mul(2);
-    let path_filter_lance = path_filter.map(String::from);
-    let path_filter_falkor = path_filter.map(String::from);
-    let (mut lancedb_hits, falkor_hits) = std::thread::scope(|scope| {
-        let lance = scope.spawn(|| {
-            hybrid_query_with_uri(
-                &lancedb_uri,
-                storage_options.as_deref(),
-                &query_text,
-                &query_embedding,
-                top_for_backend,
-                path_filter_lance.as_deref(),
-            )
-            .unwrap_or_default()
-        });
-        let graph = scope.spawn(|| {
-            if let Some(socket_path) = falkor_socket {
-                query_falkor_chunks(
-                    &socket_path,
-                    &graph_name,
-                    &query_text,
-                    top_for_backend,
-                    path_filter_falkor.as_deref(),
-                )
-                .unwrap_or_else(|err| {
-                    crate::term::warn(format!(
-                        "warning: falkor query failed, continuing with lancedb: {err}"
-                    ));
-                    Vec::new()
-                })
-            } else {
-                Vec::new()
+    let mut hits: Vec<QueryHit> = {
+        #[cfg(feature = "store-helix-only")]
+        {
+            let pack_path = loc.as_path().expect("local pack required for helix");
+            let path = helix_pack_path_for_local(pack_path);
+            let top_for_backend = top_k.saturating_mul(2);
+            helix_hybrid_query(&path, q, &q_embedding, top_for_backend, path_filter)?
+        }
+        #[cfg(all(not(feature = "store-helix-only"), feature = "lance-falkor"))]
+        {
+            let lancedb_uri = loc.lancedb_uri();
+            let storage_options = loc.storage_options().map(|o| o.to_vec());
+            let query_text = q.to_string();
+            let falkor_socket = socket_from_env();
+            let graph_name = graph_name_override
+                .map(String::from)
+                .unwrap_or_else(graph_name_from_env);
+            let top_for_backend = top_k.saturating_mul(2);
+            let path_filter_lance = path_filter.map(String::from);
+            let path_filter_falkor = path_filter.map(String::from);
+            let (lancedb_hits, falkor_hits) = std::thread::scope(|scope| {
+                let lance = scope.spawn(|| {
+                    hybrid_query_with_uri(
+                        &lancedb_uri,
+                        storage_options.as_deref(),
+                        &query_text,
+                        &q_embedding,
+                        top_for_backend,
+                        path_filter_lance.as_deref(),
+                    )
+                    .unwrap_or_default()
+                });
+                let graph = scope.spawn(|| {
+                    if let Some(socket_path) = falkor_socket {
+                        query_falkor_chunks(
+                            &socket_path,
+                            &graph_name,
+                            &query_text,
+                            top_for_backend,
+                            path_filter_falkor.as_deref(),
+                        )
+                        .unwrap_or_else(|err| {
+                            crate::term::warn(format!(
+                                "warning: falkor query failed, continuing with lancedb: {err}"
+                            ));
+                            Vec::new()
+                        })
+                    } else {
+                        Vec::new()
+                    }
+                });
+                (lance.join().unwrap_or_default(), graph.join().unwrap_or_default())
+            });
+            let mut merged: HashMap<String, QueryHit> = HashMap::new();
+            for (rank, hit) in lancedb_hits.into_iter().enumerate() {
+                let rr = 1.0 / (60.0 + rank as f32 + 1.0);
+                merged
+                    .entry(hit.chunk_id.clone())
+                    .and_modify(|e| {
+                        e.score += rr;
+                        e.source = "vector".to_string();
+                    })
+                    .or_insert(QueryHit {
+                        score: rr,
+                        source: "vector".to_string(),
+                        ..hit
+                    });
             }
-        });
-
-        let lancedb_hits = lance.join().unwrap_or_default();
-        let falkor_hits = graph.join().unwrap_or_default();
-        (lancedb_hits, falkor_hits)
-    });
+            for (rank, hit) in falkor_hits.into_iter().enumerate() {
+                let rr = (1.0 / (60.0 + rank as f32 + 1.0)) * 0.9;
+                merged
+                    .entry(hit.chunk_id.clone())
+                    .and_modify(|e| {
+                        e.score += rr;
+                        e.source = if e.source == "vector" { "both" } else { "graph" }.to_string();
+                    })
+                    .or_insert(QueryHit {
+                        score: rr,
+                        source: "graph".to_string(),
+                        ..hit
+                    });
+            }
+            merged
+                .into_values()
+                .map(|d| QueryHit {
+                    group_key: Some(d.file_path.clone()),
+                    ..d
+                })
+                .filter(|h| h.score > 0.0)
+                .collect()
+        }
+    };
     let retrieval_ms = retrieval_start.elapsed().as_millis();
 
     let rerank_start = Instant::now();
 
-    if lancedb_hits.is_empty() && falkor_hits.is_empty() {
+    if hits.is_empty() {
         let docs = index_docs.iter().filter(|d| {
             path_filter.map_or(true, |pf| {
                 let p = d.source_path.replace('\\', "/");
@@ -135,7 +190,7 @@ pub fn run_query(
                 p.contains(&pf_norm)
             })
         });
-        lancedb_hits = docs
+        hits = docs
             .map(|d| {
                 let vec = cosine(&q_embedding, &d.embedding);
                 QueryHit {
@@ -153,45 +208,6 @@ pub fn run_query(
             .filter(|h| h.score > 0.0)
             .collect();
     }
-
-    let mut merged: HashMap<String, QueryHit> = HashMap::new();
-    for (rank, hit) in lancedb_hits.into_iter().enumerate() {
-        let rr = 1.0 / (60.0 + rank as f32 + 1.0);
-        merged
-            .entry(hit.chunk_id.clone())
-            .and_modify(|e| {
-                e.score += rr;
-                e.source = "vector".to_string();
-            })
-            .or_insert(QueryHit {
-                score: rr,
-                source: "vector".to_string(),
-                ..hit
-            });
-    }
-    for (rank, hit) in falkor_hits.into_iter().enumerate() {
-        let rr = (1.0 / (60.0 + rank as f32 + 1.0)) * 0.9;
-        merged
-            .entry(hit.chunk_id.clone())
-            .and_modify(|e| {
-                e.score += rr;
-                e.source = if e.source == "vector" { "both" } else { "graph" }.to_string();
-            })
-            .or_insert(QueryHit {
-                score: rr,
-                source: "graph".to_string(),
-                ..hit
-            });
-    }
-
-    let mut hits: Vec<QueryHit> = merged
-        .into_values()
-        .map(|d| QueryHit {
-            group_key: Some(d.file_path.clone()),
-            ..d
-        })
-        .filter(|h| h.score > 0.0)
-        .collect();
 
     hits.sort_by(|a, b| {
         b.score
@@ -307,7 +323,10 @@ pub fn run_query_multi(
                 let q = q.to_string();
                 let pf = path_filter_owned.clone();
                 scope.spawn(move || {
+                    #[cfg(feature = "lance-falkor")]
                     let graph_name = loc.as_path().and_then(|p| graph_name_for_pack(p).ok());
+                    #[cfg(not(feature = "lance-falkor"))]
+                    let graph_name: Option<String> = None;
                     run_query(
                         &loc,
                         &q,

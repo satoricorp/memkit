@@ -6,13 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
 use crate::types::QueryHit;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GraphRelation {
-    pub source: String,
-    pub relation: String,
-    pub target: String,
-}
+pub use crate::types::GraphRelation;
 
 #[derive(Debug, Clone)]
 pub struct ChunkGraphPayload {

@@ -43,6 +43,17 @@ mk graph
 
 Agent-friendly flags: `--json` (input), `--output json`, `--dry-run`. See [CONTEXT.md](CONTEXT.md).
 
+## Helix migration (branch `helix-migration`)
+
+On the `helix-migration` branch you can build with optional Helix support (one LMDB per memory pack under `<base>/<user_id>/<memory_pack_id>/`):
+
+```bash
+cargo build --release --features helix
+```
+
+- `MEMKIT_HELIX_ROOT` — Base directory for Helix pack DBs (default `~/.memkit/helix`). Packs live at `<base>/<user_id>/<memory_pack_id>/`.
+- Without `--features helix`, the binary uses only LanceDB + FalkorDB (unchanged). With the feature, the Helix store module and path layout are available; full backend swap is still in progress.
+
 ## Environment
 
 - `FALKORDB_SOCKET` (default `/tmp/falkordb.sock`)

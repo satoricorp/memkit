@@ -19,11 +19,19 @@ pub fn extract_text(path: &Path) -> Option<String> {
         .map(|s| s.to_lowercase());
     let ext_str = ext.as_deref().unwrap_or("");
 
+    if ext_str == "pdf" {
+        return extract_pdf(path);
+    }
     if is_office_extension(ext_str) {
         extract_office(path, ext_str)
     } else {
         extract_plain_text(path, ext_str)
     }
+}
+
+fn extract_pdf(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    pdf_extract::extract_text_from_mem(&bytes).ok()
 }
 
 fn extract_plain_text(path: &Path, ext: &str) -> Option<String> {

@@ -8,10 +8,16 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::embed::provider_from_name;
+#[cfg(feature = "lance-falkor")]
 use crate::falkor_store::{
     ChunkGraphPayload, delete_chunks_for_paths, graph_name_from_env, socket_from_env, upsert_chunks,
 };
+#[cfg(feature = "lance-falkor")]
 use crate::lancedb_store::{ensure_chunk_ids, load_all_docs, rebuild_tables};
+#[cfg(feature = "store-helix-only")]
+use crate::helix_store::{
+    helix_load_all_docs, helix_pack_path_for_local, helix_rebuild_chunks, helix_write_graph_stats,
+};
 use crate::ontology::OntologyEngine;
 use crate::pack::{
     load_file_state, load_manifest, save_file_state, save_manifest,
@@ -27,7 +33,7 @@ fn is_indexable_file(path: &Path) -> bool {
     match ext.as_deref() {
         Some(
             "rs" | "ts" | "tsx" | "js" | "jsx" | "md" | "txt" | "json" | "toml" | "yaml" | "yml"
-            | "doc" | "docx" | "xls" | "xlsx" | "xlsb",
+            | "doc" | "docx" | "xls" | "xlsx" | "xlsb" | "pdf",
         )
         | None => true,
         _ => false,
@@ -112,7 +118,16 @@ pub fn run_index(
 ) -> Result<(usize, usize, usize)> {
     let mut manifest = load_manifest(pack_dir)?;
     manifest.sources = to_source_configs(pack_dir, sources);
-    let existing_docs = load_all_docs(pack_dir, manifest.embedding.dimension)?;
+    let existing_docs: Vec<_> = {
+        #[cfg(feature = "store-helix-only")]
+        {
+            helix_load_all_docs(&helix_pack_path_for_local(pack_dir), manifest.embedding.dimension)?
+        }
+        #[cfg(feature = "lance-falkor")]
+        {
+            load_all_docs(pack_dir, manifest.embedding.dimension)?
+        }
+    };
     let existing_by_chunk: HashMap<String, SourceDoc> = existing_docs
         .into_iter()
         .map(|d| (d.chunk_id.clone(), d))
@@ -264,13 +279,26 @@ pub fn run_index(
         }
     }
 
-    ensure_chunk_ids(&mut next_docs);
-    ensure_chunk_ids(&mut changed_docs);
-    rebuild_tables(pack_dir, &next_docs, manifest.embedding.dimension)
-        .context("failed to rebuild lancedb tables/indexes")?;
+    #[cfg(feature = "lance-falkor")]
+    {
+        ensure_chunk_ids(&mut next_docs);
+        ensure_chunk_ids(&mut changed_docs);
+        rebuild_tables(pack_dir, &next_docs, manifest.embedding.dimension)
+            .context("failed to rebuild lancedb tables/indexes")?;
+    }
+    #[cfg(feature = "store-helix-only")]
+    {
+        helix_rebuild_chunks(
+            &helix_pack_path_for_local(pack_dir),
+            &next_docs,
+            manifest.embedding.dimension,
+        )
+        .context("failed to rebuild helix store")?;
+    }
     save_file_state(pack_dir, &next_states).context("failed to persist file state")?;
 
     let mut ontology = OntologyEngine::new(pack_dir)?;
+    #[cfg(feature = "lance-falkor")]
     if let Some(socket_path) = socket_from_env() {
         let graph_name = graph_name_override
             .map(String::from)
@@ -307,6 +335,21 @@ pub fn run_index(
             if let Err(e) = upsert_chunks(&socket_path, &graph_name, &graph_chunks) {
                 crate::term::warn(format!("warning: failed writing chunks to falkor: {e}"));
             }
+        }
+    }
+    #[cfg(feature = "store-helix-only")]
+    {
+        let mut all_entities = HashSet::new();
+        let mut total_relationships = 0usize;
+        for doc in &next_docs {
+            let extraction = ontology.extract(&doc.content_hash, &doc.content, 12);
+            for e in &extraction.entities {
+                all_entities.insert(e.clone());
+            }
+            total_relationships += extraction.relations.len();
+        }
+        if let Err(e) = helix_write_graph_stats(pack_dir, all_entities.len(), total_relationships) {
+            crate::term::warn(format!("warning: failed writing graph stats: {}", e));
         }
     }
 

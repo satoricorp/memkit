@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
 
-use crate::falkor_store::GraphRelation;
+use crate::types::GraphRelation;
 use crate::ontology::{LlmConfig, OntologyExtraction, OntologyProvider};
 
 #[cfg(feature = "llama-embedded")]

@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::falkor_store::GraphRelation;
+use crate::types::GraphRelation;
 use crate::ontology_candle::CandleOntologyProvider;
 use crate::ontology_llama::LlamaOntologyProvider;
 
