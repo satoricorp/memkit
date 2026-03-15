@@ -414,29 +414,41 @@ async fn status(
             let mut all_sources = Vec::new();
             let mut all_paths = Vec::new();
             let mut total_vectors = 0usize;
-            for pack in state.packs.iter() {
-                if let Ok(m) = load_manifest(pack) {
+            for pack_root in state.packs.iter() {
+                let pack_dir = pack_dir_for_path(pack_root);
+                if let Ok(m) = load_manifest(&pack_dir) {
                     all_sources.extend(m.sources);
                 }
-                if let Ok(m) = load_manifest(pack) {
-                    if let Ok(docs) = load_pack_docs(pack, m.embedding.dimension) {
+                if let Ok(m) = load_manifest(&pack_dir) {
+                    if let Ok(docs) = load_pack_docs(&pack_dir, m.embedding.dimension) {
                         total_vectors += docs.len();
                         all_paths.extend(docs.iter().map(|d| d.source_path.clone()));
                     }
                 }
             }
             let pack_str = if state.packs.len() == 1 {
-                state.packs[0].display().to_string()
+                let root = &state.packs[0];
+                let is_home = dirs::home_dir()
+                    .as_ref()
+                    .and_then(|h| h.canonicalize().ok())
+                    .as_ref()
+                    == root.canonicalize().as_ref().ok();
+                if is_home {
+                    "~/.memkit".to_string()
+                } else {
+                    root.display().to_string()
+                }
             } else {
                 format!("{} packs", state.packs.len())
             };
+            let pack_for_helix = state.packs.first().map(|r| pack_dir_for_path(r));
             (
                 pack_str,
                 all_sources,
                 total_vectors,
                 total_vectors > 0,
                 all_paths,
-                state.packs.first().cloned(),
+                pack_for_helix,
             )
         };
 
@@ -491,7 +503,10 @@ async fn status(
         (active, last, queued_list)
     };
 
-    let pack_paths: Vec<String> = state.packs.iter().map(|p| p.display().to_string()).collect();
+    let pack_paths: Vec<String> = state.packs.iter().map(|p| {
+        let is_home = dirs::home_dir().as_ref().and_then(|h| h.canonicalize().ok()).as_ref() == p.canonicalize().as_ref().ok();
+        if is_home { "~/.memkit".to_string() } else { p.display().to_string() }
+    }).collect();
     Json(json!({
         "status": "ok",
         "pack_path": pack_str,
@@ -664,17 +679,19 @@ async fn query(
             req.path_filter.as_deref(),
         )
     } else if state.packs.len() > 1 {
+        let pack_dirs: Vec<PathBuf> = state.packs.iter().map(|r| pack_dir_for_path(r.as_path())).collect();
         run_query_multi(
-            &state.packs,
+            &pack_dirs,
             &req.query,
             req.top_k,
             req.use_reranker,
             req.path_filter.as_deref(),
         )
     } else {
-        let pack = state.packs.first().unwrap();
+        let pack_root = state.packs.first().unwrap();
+        let pack_dir = pack_dir_for_path(pack_root);
         run_query(
-            &PackLocation::local(pack),
+            &PackLocation::local(&pack_dir),
             &req.query,
             req.top_k,
             req.use_reranker,
@@ -814,6 +831,33 @@ async fn index_now(
                     Json(json!({"error":{"code":"PATH_INVALID","message":format!("path not accessible: {}", e)}})),
                 )
             })?;
+        // #region agent log
+        let has_manifest = dir.join("manifest.json").exists();
+        let home_canon = dirs::home_dir().as_ref().and_then(|h| h.canonicalize().ok());
+        let is_home = home_canon.as_ref() == Some(&dir);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/Users/joe/git/local/.cursor/debug-14a764.log") {
+            use std::io::Write;
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+            let _ = writeln!(f, "{}", serde_json::json!({"sessionId":"14a764","location":"server.rs:index_now","message":"index request","data":{"path":path,"dir":dir.to_string_lossy().to_string(),"has_manifest":has_manifest,"is_home":is_home},"timestamp":ts,"hypothesisId":"B"}));
+            let _ = f.flush();
+        }
+        // #endregion
+        // When path is an existing pack dir (has manifest.json): enqueue index for that pack (no copy).
+        if has_manifest {
+            let pack_dir = dir;
+            let job = enqueue_index_job(
+                &state,
+                "manual_index",
+                Some(pack_dir.to_string_lossy().to_string()),
+                None,
+            )
+            .await;
+            start_next_job_if_idle(state.clone());
+            return Ok(Json(json!({
+                "status": "accepted",
+                "job": job
+            })));
+        }
         let pack_dir = pack_dir_for_path(&dir);
         // When path is home directory: only enqueue index job for the pack at ~/.memkit (no copy, no new source).
         let is_home = dirs::home_dir()
@@ -1073,12 +1117,12 @@ fn start_next_job_if_idle(state: AppState) {
                     let mut total_scanned = 0usize;
                     let mut total_updated = 0usize;
                     let mut total_chunks = 0usize;
-                    let multi = packs_to_index.len() > 1;
+                    let _multi = packs_to_index.len() > 1;
                     for pack in &packs_to_index {
                         let manifest = load_manifest(pack)?;
                         let sources = resolve_source_roots(pack, &manifest);
                         #[cfg(feature = "lance-falkor")]
-                        let graph_name = if multi { graph_name_for_pack(pack).ok() } else { None };
+                        let graph_name = if _multi { graph_name_for_pack(pack).ok() } else { None };
                         #[cfg(feature = "store-helix-only")]
                         let graph_name: Option<String> = None;
                         let (scanned, updated, chunks) =
@@ -1427,10 +1471,11 @@ async fn mcp(
                     let top_k = args.get("top_k").and_then(Value::as_u64).unwrap_or(8) as usize;
                     let use_reranker = args.get("use_reranker").and_then(Value::as_bool).unwrap_or(true);
 
+                    let pack_dirs: Vec<PathBuf> = state.packs.iter().map(|r| pack_dir_for_path(r.as_path())).collect();
                     let resp = if state.packs.len() > 1 {
-                        run_query_multi(&state.packs, &query, top_k, use_reranker, None)
+                        run_query_multi(&pack_dirs, &query, top_k, use_reranker, None)
                     } else {
-                        let p = state.packs.first().unwrap();
+                        let p = pack_dirs.first().unwrap();
                         run_query(&PackLocation::local(p), &query, top_k, use_reranker, None, None)
                     };
                     match resp {
@@ -1447,17 +1492,27 @@ async fn mcp(
                         }
                     }
                 }
-                "memory_status" => json!({
-                    "content":[{"type":"text","text":json!({
-                        "status":"ok",
-                        "pack_path": state.packs.first().map(|p| p.display().to_string()).unwrap_or_default(),
-                        "pack_paths": state.packs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
-                    }).to_string()}]
-                }),
+                "memory_status" => {
+                    let pack_path_display = state.packs.first().map(|p| {
+                        let is_home = dirs::home_dir().as_ref().and_then(|h| h.canonicalize().ok()).as_ref() == p.canonicalize().as_ref().ok();
+                        if is_home { "~/.memkit".to_string() } else { p.display().to_string() }
+                    }).unwrap_or_default();
+                    json!({
+                        "content":[{"type":"text","text":json!({
+                            "status":"ok",
+                            "pack_path": pack_path_display,
+                            "pack_paths": state.packs.iter().map(|p| {
+                                let is_home = dirs::home_dir().as_ref().and_then(|h| h.canonicalize().ok()).as_ref() == p.canonicalize().as_ref().ok();
+                                if is_home { "~/.memkit".to_string() } else { p.display().to_string() }
+                            }).collect::<Vec<_>>()
+                        }).to_string()}]
+                    })
+                },
                 "memory_sources" => {
                     let mut all_sources = Vec::new();
-                    for pack in state.packs.iter() {
-                        if let Ok(m) = load_manifest(pack) {
+                    for pack_root in state.packs.iter() {
+                        let pack_dir = pack_dir_for_path(pack_root);
+                        if let Ok(m) = load_manifest(&pack_dir) {
                             all_sources.extend(m.sources);
                         }
                     }

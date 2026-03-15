@@ -461,16 +461,11 @@ pub async fn list(cfg: &ServerConfig, output_json: bool) -> Result<Value> {
     }
 
     if !output_json {
-        let home_canon = dirs::home_dir()
-            .and_then(|h| std::path::Path::new(&h).canonicalize().ok())
-            .and_then(|h| h.to_str().map(String::from));
+        let home_canon = dirs::home_dir().and_then(|h| h.canonicalize().ok());
         for p in &reg.packs {
             let default_marker = if p.default { " (default)" } else { "" };
-            let path_display = if home_canon.as_ref() == Some(&p.path) {
-                "~"
-            } else {
-                p.path.as_str()
-            };
+            let path_is_home = PathBuf::from(&p.path).canonicalize().ok().as_ref() == home_canon.as_ref();
+            let path_display = if path_is_home { "~/.memkit" } else { p.path.as_str() };
             let (lead, path_part) = if let Some(ref name) = p.name {
                 (name.as_str(), path_display)
             } else {
@@ -588,7 +583,27 @@ pub async fn index(cfg: &ServerConfig, path: &str, name: Option<&str>, dry_run: 
     let status = resp.status();
     let body = resp.text().await?;
     if !status.is_success() {
-        return Err(anyhow!("index request failed: {}", body));
+        // #region agent log
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let line = serde_json::json!({"sessionId":"14a764","location":"cli_client.rs:index","message":"index non-2xx","data":{"path":path,"status":status.as_u16(),"body":body},"timestamp":ts,"hypothesisId":"C"});
+        for log_path in [
+            "/Users/joe/git/local/.cursor/debug-14a764.log",
+            "/Users/joe/git/local/debug-14a764.log",
+            "debug-14a764.log",
+        ] {
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
+                let _ = writeln!(f, "{}", line);
+                let _ = f.flush();
+                break;
+            }
+        }
+        // #endregion
+        let hint = if body.contains("INDEX_HOME_REFUSED") {
+            "Use the mk binary from this repo and stop any old server: (1) lsof -i :4242 then kill <pid> (2) from repo root: cargo run -- mk add <path>"
+        } else {
+            "Stop any running mk server (kill the process on the API port), then run again from repo: cargo run -- mk add <path>."
+        };
+        return Err(anyhow!("index request failed: {}. {}", body, hint));
     }
     let out: Value = serde_json::from_str(&body)?;
     if !output_json {
