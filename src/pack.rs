@@ -197,21 +197,6 @@ pub fn copy_dir_into_sources(source_dir: &Path, pack_dir: &Path, name: &str) -> 
     })
 }
 
-/// Copies a single file into pack_dir/sources/_files/<filename>. Creates sources/_files if needed.
-pub fn copy_file_into_sources(source: &Path, pack_dir: &Path) -> Result<PathBuf> {
-    if !source.is_file() {
-        bail!("not a file: {}", source.display());
-    }
-    let name = source
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("invalid source path"))?;
-    let dest_dir = pack_dir.join(SOURCES_DIR).join(SOURCES_FILES_DIR);
-    fs::create_dir_all(&dest_dir).context("failed to create sources/_files")?;
-    let dest = dest_dir.join(name);
-    fs::copy(source, &dest).context("failed to copy file")?;
-    Ok(dest)
-}
-
 /// Adds a source root to the manifest if not already present. root_path can be pack-relative or absolute. Saves manifest.
 pub fn add_source_root(pack_dir: &Path, root_path: &str) -> Result<()> {
     let mut manifest = load_manifest(pack_dir)?;

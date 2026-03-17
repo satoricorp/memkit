@@ -145,21 +145,6 @@ pub fn set_default(name_or_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Remove a pack from the registry by name or path. If it was the default, clears or reassigns default.
-/// Returns an error if the pack is not in the registry.
-pub fn remove_pack(name_or_path: &str) -> Result<()> {
-    let path = resolve_pack_by_name_or_path(name_or_path)?;
-    let normalized = path
-        .canonicalize()
-        .context("pack path no longer exists")?
-        .to_string_lossy()
-        .to_string();
-    if !remove_pack_by_path_inner(&normalized)? {
-        return Err(anyhow!("pack not in registry: {}", name_or_path));
-    }
-    Ok(())
-}
-
 /// Remove a pack from the registry by canonical path. Does not require the path to have pack artifacts.
 /// Returns true if a pack was removed, false if not in registry.
 pub fn remove_pack_by_path(path: &Path) -> Result<bool> {
@@ -189,8 +174,55 @@ fn remove_pack_by_path_inner(normalized: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// When default_path is unset but we have packs, set default to the single pack, or the pack at ~/.memkit, or the first pack.
+pub fn ensure_default_if_unset() -> Result<()> {
+    let mut reg = load_registry().unwrap_or_default();
+    if reg.default_path.is_some() || reg.packs.is_empty() {
+        return Ok(());
+    }
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("home directory not available"))?;
+    let home_str = home.canonicalize().ok().map(|p| p.to_string_lossy().to_string());
+    let default_path = if reg.packs.len() == 1 {
+        Some(reg.packs[0].path.clone())
+    } else if let Some(ref h) = home_str {
+        reg.packs
+            .iter()
+            .find(|p| p.path == *h || p.path == format!("{}/.memkit", h))
+            .map(|p| p.path.clone())
+    } else {
+        None
+    };
+    let path_to_set = default_path.or_else(|| reg.packs.first().map(|p| p.path.clone()));
+    if let Some(ref path) = path_to_set {
+        reg.default_path = Some(path.clone());
+        for p in &mut reg.packs {
+            p.default = p.path == *path;
+            if p.path == *path {
+                p.name = Some("default".to_string());
+            }
+        }
+        save_registry(&reg)?;
+    }
+    Ok(())
+}
+
 /// Resolve a pack by name (registry) or by path. Returns the directory that contains the pack (parent of .memkit or pack root).
 pub fn resolve_pack_by_name_or_path(arg: &str) -> Result<PathBuf> {
+    if arg == "default" {
+        ensure_default_if_unset()?;
+        let reg = load_registry().unwrap_or_default();
+        let path = reg
+            .default_path
+            .as_ref()
+            .ok_or_else(|| anyhow!("no default pack set"))?;
+        let path = PathBuf::from(path)
+            .canonicalize()
+            .context("default pack path no longer exists")?;
+        if path.join(".memkit/manifest.json").exists() || path.join("manifest.json").exists() {
+            return Ok(path);
+        }
+        anyhow::bail!("default pack path {} has no manifest", path.display());
+    }
     let reg = load_registry().unwrap_or_default();
     if let Some(p) = reg.packs.iter().find(|p| p.name.as_deref() == Some(arg)) {
         let path = PathBuf::from(&p.path)
