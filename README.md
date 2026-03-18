@@ -26,39 +26,52 @@ mk serve --pack ./pack1,./pack2
 # CLI commands (require server to be running)
 mk list
 mk status ~/memory
-mk index ~/memory
+mk add ~/Documents/project-notes
 mk query "local memory pack"
-mk graph
 ```
 
 ## Commands
 
-- `mk serve [--pack <path>] [--host] [--port]` — Start the server. `--pack` accepts comma-delimited paths for multi-pack mode.
-- `mk status [dir]` — With dir: show status for that pack. Without dir: show mk list
-- `mk list` — List indexed directories with [local] [cloud]
-- `mk index <dir>` — Start background index job, print job id
-- `mk graph [--pack <dir>]` — Open graph view in browser
-- `mk query "<text>" [--pack <dir>]` — Query default pack (or --pack)
-- `mk schema [command]` — Introspect input schema for commands (agent-friendly)
+- `mk add <path-or-url> [--pack <name-or-path>]` — Add local files or URL/docs to a pack.
+- `mk remove [dir]` — Remove a pack (prompts unless `--yes`).
+- `mk status [dir]` — With `dir`: show status for that pack. Without `dir`: show `mk list`.
+- `mk list` — List registered packs with source and indexing status.
+- `mk query "<text>" [--pack <name-or-path>] [--top-k N] [--no-rerank] [--raw]` — Query a pack.
+- `mk publish [--pack <name-or-path>] [--destination s3://bucket/prefix]` — Publish pack artifacts.
+- `mk use [name-or-path|model-name]` — Set default pack or default model.
+- `mk models` — Show current model and supported model IDs.
+- `mk serve [--pack <path>] [--host] [--port] [--foreground]` — Start server (background by default).
+- `mk stop [--port]` — Stop background server on the configured port.
+- `mk schema [command]` — Introspect input schema for commands (agent-friendly).
 
 Agent-friendly flags: `--json` (input), `--output json`, `--dry-run`. See [CONTEXT.md](CONTEXT.md).
 
-## Helix migration (branch `helix-migration`)
+## Storage backend
 
-On the `helix-migration` branch you can build with optional Helix support (one LMDB per memory pack under `<base>/<user_id>/<memory_pack_id>/`):
+The current build uses Helix as the local vector/graph store.
 
 ```bash
-cargo build --release --features helix
+cargo build --release
 ```
 
-- `MEMKIT_HELIX_ROOT` — Base directory for Helix pack DBs (default `~/.memkit/helix`). Packs live at `<base>/<user_id>/<memory_pack_id>/`.
-- Without `--features helix`, the binary uses only LanceDB + FalkorDB (unchanged). With the feature, the Helix store module and path layout are available; full backend swap is still in progress.
+- `MEMKIT_HELIX_ROOT` — Base directory for Helix pack DBs (default `~/.memkit/helix`).
+
+## Configuration file
+
+`mk` stores user preferences in:
+
+- `~/.config/memkit/memkit.json` (or `$XDG_CONFIG_HOME/memkit/memkit.json`)
+
+Current fields:
+
+- `model` (optional) — Default model ID used by `mk use <model-name>`.
+
+Precedence: `MEMKIT_LLM_MODEL` environment variable overrides `memkit.json` model selection.
 
 ## Environment
 
 - `FALKORDB_SOCKET` (default `/tmp/falkordb.sock`)
 - `FALKOR_GRAPH` (default `memkit`)
-- `LANCEDB_PATH` (default `./.local-data/lance`)
 - `API_PORT` (default `4242`)
 - `MEMKIT_PACK_PATH` (default `./memory-pack` when using serve)
 - `MEMKIT_PACK_PATHS` — Comma-delimited pack paths for multi-pack mode (overrides `MEMKIT_PACK_PATH` when set)

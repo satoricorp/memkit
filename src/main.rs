@@ -1,5 +1,6 @@
 mod add_docs;
 mod cli_client;
+mod config;
 #[cfg(feature = "helix")]
 mod helix_store;
 mod extract;
@@ -83,7 +84,7 @@ use colored_json::to_colored_json_auto;
 use owo_colors::OwoColorize;
 
 use crate::cli_client::{ServerConfig, QueryArgs};
-use crate::pack::{add_source_root, init_pack};
+use crate::pack::{has_manifest_at, init_pack};
 use crate::registry::{ensure_registered, load_registry, pack_dir_for_path, resolve_pack_by_name_or_path, set_default};
 use crate::server::run_server;
 
@@ -155,8 +156,6 @@ enum CliCommand {
     Remove { dir: Option<String>, yes: bool },
     Status { dir: Option<String> },
     List,
-    Index { dir: String, name: Option<String> },
-    Graph { pack: Option<String> },
     Query {
         query: String,
         top_k: usize,
@@ -170,6 +169,7 @@ enum CliCommand {
         destination: Option<String>,
     },
     Use { pack: Option<String> },
+    Models,
     Serve {
         pack: Option<String>,
         host: Option<String>,
@@ -185,7 +185,7 @@ fn resolve_pack_root(pack_arg: Option<&str>) -> Result<PathBuf> {
         return resolve_pack_by_name_or_path(p);
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if cwd.join(".memkit/manifest.json").exists() {
+    if has_manifest_at(&cwd) {
         return Ok(cwd);
     }
     let reg = load_registry().unwrap_or_default();
@@ -196,13 +196,12 @@ fn resolve_pack_root(pack_arg: Option<&str>) -> Result<PathBuf> {
         return Ok(PathBuf::from(&p.path));
     }
     if let Some(home) = dirs::home_dir() {
-        let pack_dir = pack_dir_for_path(&home);
-        if pack_dir.join("manifest.json").exists() {
+        if has_manifest_at(&home) {
             return Ok(home);
         }
     }
     anyhow::bail!(
-        "no memory pack found. use --pack <name-or-path> or run `mk index <dir>` first"
+        "no memory pack found. use --pack <name-or-path> or run `mk add <path>` first"
     )
 }
 
@@ -224,17 +223,18 @@ fn create_default_pack() -> Result<PathBuf> {
 
 /// Resolve pack root; if none exists and pack_arg is None, create a default pack in ~ and return it.
 fn ensure_pack_root(pack_arg: Option<&str>) -> Result<PathBuf> {
-    match resolve_pack_root(pack_arg) {
-        Ok(p) => Ok(p),
-        Err(e) => {
-            if pack_arg.is_none() && e.to_string().contains("no memory pack found") {
-                create_default_pack()?;
-                resolve_pack_root(None)
-            } else {
-                Err(e)
-            }
+    if pack_arg.is_none() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let home_has_pack = dirs::home_dir()
+            .as_ref()
+            .map(|h| has_manifest_at(h))
+            .unwrap_or(false);
+        let reg = load_registry().unwrap_or_default();
+        if reg.packs.is_empty() && !has_manifest_at(&cwd) && !home_has_pack {
+            create_default_pack()?;
         }
     }
+    resolve_pack_root(pack_arg)
 }
 
 fn parse_pack_paths(value: &str) -> Vec<PathBuf> {
@@ -261,6 +261,21 @@ fn extract_json_from_args(args: &[String]) -> (Option<serde_json::Value>, Vec<St
         }
     }
     (json_value, filtered)
+}
+
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    let mut i = 0usize;
+    while i < args.len() {
+        if args[i] == flag {
+            return args.get(i + 1).cloned();
+        }
+        i += 1;
+    }
+    None
+}
+
+fn has_any_flag(args: &[String], flags: &[&str]) -> bool {
+    args.iter().any(|a| flags.iter().any(|f| a == f))
 }
 
 fn parse_serve(args: &[String]) -> Result<Option<ServeConfig>> {
@@ -383,12 +398,6 @@ fn cli_command_from_json(cmd: &str, j: &serde_json::Value) -> Result<CliCommand>
             Ok(CliCommand::Status { dir })
         }
         "list" => Ok(CliCommand::List),
-        "index" => {
-            let dir = get_str("dir").ok_or_else(|| anyhow!("--json must include \"dir\""))?;
-            crate::validate::validate_path(&dir)?;
-            Ok(CliCommand::Index { dir, name: get_str("name") })
-        }
-        "graph" => Ok(CliCommand::Graph { pack: get_str("pack") }),
         "query" => {
             let query = get_str("query").ok_or_else(|| anyhow!("--json must include \"query\""))?;
             crate::validate::reject_control_chars(&query)?;
@@ -404,6 +413,7 @@ fn cli_command_from_json(cmd: &str, j: &serde_json::Value) -> Result<CliCommand>
         }),
         "schema" => Ok(CliCommand::Schema { command: get_str("schema") }),
         "use" => Ok(CliCommand::Use { pack: get_str("pack") }),
+        "models" => Ok(CliCommand::Models),
         "help" | "--help" | "-h" => Ok(CliCommand::Help),
         other => Err(anyhow!("unknown command: {}. run `mk help` for usage", other)),
     }
@@ -428,16 +438,7 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
     match args[0].as_str() {
         "add" => {
             let (json_val, rest) = extract_json_from_args(&args[1..]);
-            let mut pack_from_rest = None;
-            let mut i = 0usize;
-            while i < rest.len() {
-                if rest[i] == "--pack" && rest.get(i + 1).is_some() {
-                    pack_from_rest = rest.get(i + 1).cloned();
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
+            let pack_from_rest = flag_value(&rest, "--pack");
             if let Some(j) = json_val {
                 return parse_add_command(&j, pack_from_rest);
             }
@@ -511,52 +512,6 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
             Ok(CliCommand::Status { dir })
         }
         "list" => Ok(CliCommand::List),
-        "index" => {
-            let (json_val, rest) = extract_json_from_args(&args[1..]);
-            if let Some(j) = json_val {
-                let dir = j
-                    .get("dir")
-                    .and_then(serde_json::Value::as_str)
-                    .map(String::from)
-                    .ok_or_else(|| anyhow!("--json must include \"dir\""))?;
-                crate::validate::validate_path(&dir)?;
-                return Ok(CliCommand::Index { dir, name: j.get("name").and_then(serde_json::Value::as_str).map(String::from) });
-            }
-            let dir = rest
-                .first()
-                .cloned()
-                .ok_or_else(|| anyhow!("usage: mk index <dir> [--name <name>] or mk index --json '{{\"dir\":\"...\"}}'"))?;
-            crate::validate::validate_path(&dir)?;
-            let mut name = None;
-            let mut i = 1usize;
-            while i < rest.len() {
-                if rest[i] == "--name" && rest.get(i + 1).is_some() {
-                    name = rest.get(i + 1).cloned();
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            Ok(CliCommand::Index { dir, name })
-        }
-        "graph" => {
-            let (json_val, rest) = extract_json_from_args(&args[1..]);
-            if let Some(j) = json_val {
-                let pack = j.get("pack").and_then(serde_json::Value::as_str).map(String::from);
-                return Ok(CliCommand::Graph { pack });
-            }
-            let mut pack = None;
-            let mut i = 0usize;
-            while i < rest.len() {
-                if rest[i] == "--pack" && rest.get(i + 1).is_some() {
-                    pack = rest.get(i + 1).cloned();
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            Ok(CliCommand::Graph { pack })
-        }
         "query" => {
             let (json_val, rest) = extract_json_from_args(&args[1..]);
             if let Some(j) = json_val {
@@ -634,20 +589,8 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
                     destination,
                 });
             }
-            let mut pack = None;
-            let mut destination = None;
-            let mut i = 0usize;
-            while i < rest.len() {
-                if rest[i] == "--pack" && rest.get(i + 1).is_some() {
-                    pack = rest.get(i + 1).cloned();
-                    i += 2;
-                } else if rest[i] == "--destination" && rest.get(i + 1).is_some() {
-                    destination = rest.get(i + 1).cloned();
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
+            let pack = flag_value(&rest, "--pack");
+            let destination = flag_value(&rest, "--destination");
             Ok(CliCommand::Publish { pack, destination })
         }
         "schema" => {
@@ -655,59 +598,26 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
             Ok(CliCommand::Schema { command })
         }
         "use" => {
-            let mut pack = None;
-            let mut i = 1usize;
-            while i < args.len() {
-                if args[i] == "--pack" && args.get(i + 1).is_some() {
-                    pack = args.get(i + 1).cloned();
-                    i += 2;
-                } else if !args[i].starts_with('-') {
-                    pack = Some(args[i].clone());
-                    i += 1;
-                } else {
-                    i += 1;
-                }
+            let mut pack = flag_value(&args[1..], "--pack");
+            if pack.is_none() {
+                pack = args[1..].iter().find(|a| !a.starts_with('-')).cloned();
             }
             Ok(CliCommand::Use { pack })
         }
+        "models" => Ok(CliCommand::Models),
         "serve" => {
-            let mut pack = None;
-            let mut host = None;
-            let mut port = None;
-            let mut foreground = false;
-            let mut i = 1usize;
-            while i < args.len() {
-                if args[i] == "--pack" && args.get(i + 1).is_some() {
-                    pack = args.get(i + 1).cloned();
-                    i += 2;
-                } else if args[i] == "--host" && args.get(i + 1).is_some() {
-                    host = args.get(i + 1).cloned();
-                    i += 2;
-                } else if args[i] == "--port" && args.get(i + 1).is_some() {
-                    let p = args[i + 1].parse::<u16>().map_err(|_| anyhow!("invalid --port value"))?;
-                    port = Some(p);
-                    i += 2;
-                } else if args[i] == "--foreground" {
-                    foreground = true;
-                    i += 1;
-                } else {
-                    i += 1;
-                }
-            }
+            let pack = flag_value(&args[1..], "--pack");
+            let host = flag_value(&args[1..], "--host");
+            let port = flag_value(&args[1..], "--port")
+                .map(|v| v.parse::<u16>().map_err(|_| anyhow!("invalid --port value")))
+                .transpose()?;
+            let foreground = has_any_flag(&args[1..], &["--foreground"]);
             Ok(CliCommand::Serve { pack, host, port, foreground })
         }
         "stop" => {
-            let mut port = None;
-            let mut i = 1usize;
-            while i < args.len() {
-                if args[i] == "--port" && args.get(i + 1).is_some() {
-                    let p = args[i + 1].parse::<u16>().map_err(|_| anyhow!("invalid --port value"))?;
-                    port = Some(p);
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
+            let port = flag_value(&args[1..], "--port")
+                .map(|v| v.parse::<u16>().map_err(|_| anyhow!("invalid --port value")))
+                .transpose()?;
             Ok(CliCommand::Stop { port })
         }
         "help" | "--help" | "-h" => Ok(CliCommand::Help),
@@ -718,7 +628,7 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
     }
 }
 
-const SCHEMA_COMMANDS: &[&str] = &["add", "remove", "status", "index", "graph", "query", "use"];
+const SCHEMA_COMMANDS: &[&str] = &["add", "remove", "status", "query", "use", "models"];
 
 fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
     Some(match cmd {
@@ -758,26 +668,6 @@ fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                 }
             }
         }),
-        "index" => serde_json::json!({
-            "command": "index",
-            "input": {
-                "type": "object",
-                "properties": {
-                    "dir": {"type": "string", "description": "Directory to index"},
-                    "name": {"type": "string", "description": "Pack name for reference (optional; default random word)"}
-                },
-                "required": ["dir"]
-            }
-        }),
-        "graph" => serde_json::json!({
-            "command": "graph",
-            "input": {
-                "type": "object",
-                "properties": {
-                    "pack": {"type": "string", "description": "Pack name or path (optional)"}
-                }
-            }
-        }),
         "query" => serde_json::json!({
             "command": "query",
             "input": {
@@ -797,8 +687,16 @@ fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
             "input": {
                 "type": "object",
                 "properties": {
-                    "pack": {"type": "string", "description": "Pack name or path to set as default (optional; omit to show current default)"}
+                    "pack": {"type": "string", "description": "Pack name or path, or model id (e.g. openai:gpt-4o-mini) to set as default (optional; omit to show current default pack)"}
                 }
+            }
+        }),
+        "models" => serde_json::json!({
+            "command": "models",
+            "input": {},
+            "output": {
+                "current": "string | null",
+                "supported": [{"id": "string", "description": "string"}]
             }
         }),
         _ => return None,
@@ -849,11 +747,10 @@ fn print_help() {
         "  mk remove [dir]",
         "  mk status [dir]",
         "  mk list",
-        "  mk index <dir> [--name <name>]",
-        "  mk graph [--pack <name-or-path>]",
         "  mk query <text> [--top-k N] [--no-rerank] [--pack <name-or-path>] [--raw]",
         "  mk publish [--pack <name-or-path>] [--destination s3://bucket/prefix]",
-        "  mk use [name-or-path]",
+        "  mk use [name-or-path|model-name]",
+        "  mk models  (list current model and supported models; use 'mk use <model-name>' to set)",
         "  mk serve [--pack <path>] [--host H] [--port P] [--foreground]  (run server in background; use --foreground to attach)",
         "  mk stop [--port P]  (stop the background server)",
         "  mk schema [command]",
@@ -890,12 +787,16 @@ fn load_memkit_google_json_from_dotenv_fallback() {
             if i >= 1 {
                 let trimmed = line.trim_start();
                 if !trimmed.is_empty() {
-                    let first = trimmed.chars().next().unwrap();
-                    if first.is_ascii_alphabetic() || first == '_' {
-                        let key_len = trimmed.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').count();
-                        if key_len > 0 && trimmed.chars().nth(key_len) == Some('=') {
-                            value_end = offset;
-                            break;
+                    if let Some(first) = trimmed.chars().next() {
+                        if first.is_ascii_alphabetic() || first == '_' {
+                            let key_len = trimmed
+                                .chars()
+                                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                                .count();
+                            if key_len > 0 && trimmed.chars().nth(key_len) == Some('=') {
+                                value_end = offset;
+                                break;
+                            }
                         }
                     }
                 }
@@ -961,6 +862,8 @@ async fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     let (args, ctx) = parse_global_flags(&args);
 
+    config::ensure_config_exists().context("failed to create config (e.g. ~/.config/memkit/memkit.json)")?;
+
     if let Some(cfg) = parse_serve(&args)? {
         serve_with_startup(cfg.packs, cfg.host, cfg.port).await?;
         return Ok(());
@@ -984,11 +887,13 @@ async fn main() -> Result<()> {
                 cmd.stderr(std::process::Stdio::null());
                 cmd.spawn().map_err(|e| anyhow!("failed to start server process: {}", e))?;
                 std::thread::sleep(std::time::Duration::from_secs(2));
-                if crate::term::color_stdout() {
-                    println!("{}", "Server started in background. Use 'mk status' to check.".green());
-                } else {
-                    println!("Server started in background. Use 'mk status' to check.");
-                }
+                println!(
+                    "{}",
+                    crate::term::style_stdout(
+                        "Server started in background. Use 'mk status' to check.",
+                        |s| s.green().to_string(),
+                    )
+                );
                 return Ok(());
             }
             let packs: Vec<PathBuf> = if let Some(ref p) = pack {
@@ -1019,17 +924,16 @@ async fn main() -> Result<()> {
                 for pid in stdout.trim().split_whitespace() {
                     let _ = std::process::Command::new("kill").arg(pid).status();
                 }
-                if crate::term::color_stdout() {
-                    println!("{}", "Server stopped.".green());
-                } else {
-                    println!("Server stopped.");
-                }
+                println!(
+                    "{}",
+                    crate::term::style_stdout("Server stopped.", |s| s.green().to_string())
+                );
             } else {
-                if crate::term::color_stdout() {
-                    println!("{}", format!("No server running on port {}.", port).dimmed());
-                } else {
-                    println!("No server running on port {}.", port);
-                }
+                let msg = format!("No server running on port {}.", port);
+                println!(
+                    "{}",
+                    crate::term::style_stdout(&msg, |s| s.dimmed().to_string())
+                );
             }
             return Ok(());
         }
@@ -1073,31 +977,93 @@ async fn main() -> Result<()> {
                     // Fall through to use server remove job (POST /remove).
                 }
                 CliCommand::Use { pack } => {
+                    if let Some(name_or_path) = pack.as_ref() {
+                        if name_or_path.contains(':') {
+                            if config::is_supported_model(name_or_path) {
+                                config::set_model(name_or_path)?;
+                                println!(
+                                    "{} {}",
+                                    crate::term::style_stdout(
+                                        "Default model set to",
+                                        |s| s.green().to_string()
+                                    ),
+                                    name_or_path
+                                );
+                                return Ok(());
+                            } else {
+                                anyhow::bail!(
+                                    "unknown model '{}'. run `mk models` to see supported models.",
+                                    name_or_path
+                                );
+                            }
+                        }
+                    }
                     let reg = load_registry()?;
                     if let Some(name_or_path) = pack {
                         set_default(name_or_path)?;
-                        if crate::term::color_stdout() {
-                            println!("{} {}", "Default pack set to".green(), name_or_path);
-                        } else {
-                            println!("Default pack set to {}", name_or_path);
-                        }
+                        println!(
+                            "{} {}",
+                            crate::term::style_stdout("Default pack set to", |s| s.green().to_string()),
+                            name_or_path
+                        );
                     } else {
                         if let Some(ref default_path) = reg.default_path {
                             let default_pack = reg.packs.iter().find(|p| p.path == *default_path);
                             let (name, path) = default_pack
                                 .map(|p| (p.name.as_deref().unwrap_or(p.path.as_str()), p.path.as_str()))
                                 .unwrap_or((default_path.as_str(), default_path.as_str()));
-                            if crate::term::color_stdout() {
-                                println!("{} {}  {}", "Default pack:".bold(), name, path.dimmed());
-                            } else {
-                                println!("Default pack: {}  {}", name, path);
-                            }
+                            println!(
+                                "{} {}  {}",
+                                crate::term::style_stdout("Default pack:", |s| s.bold().to_string()),
+                                name,
+                                crate::term::style_stdout(path, |s| s.dimmed().to_string())
+                            );
                         } else {
-                            if crate::term::color_stdout() {
-                                println!("{}", "No default pack set".yellow());
+                            println!(
+                                "{}",
+                                crate::term::style_stdout("No default pack set", |s| s.yellow().to_string())
+                            );
+                        }
+                    }
+                    return Ok(());
+                }
+                CliCommand::Models => {
+                    let cfg = config::load_config().unwrap_or_default();
+                    let supported = config::supported_models();
+                    if ctx.output_format == OutputFormat::Json {
+                        let out = serde_json::json!({
+                            "current": cfg.model,
+                            "supported": supported.iter().map(|(id, desc)| serde_json::json!({"id": id, "description": desc})).collect::<Vec<_>>()
+                        });
+                        println!("{}", serde_json::to_string_pretty(&out)?);
+                    } else {
+                        if crate::term::color_stdout() {
+                            println!("{}", "Models".bold().cyan());
+                            println!();
+                            if let Some(ref m) = cfg.model {
+                                println!("  {} {}", "Current:".bold(), m);
                             } else {
-                                println!("No default pack set");
+                                println!("  {} (none set)", "Current:".bold());
                             }
+                            println!();
+                            println!("  {}", "Supported:".bold());
+                            for (id, desc) in &supported {
+                                println!("    {}  {}", id.cyan(), desc.dimmed());
+                            }
+                            println!();
+                            println!("  {}", "Run 'mk use <model-name>' to use one of the available models.".dimmed());
+                        } else {
+                            if let Some(ref m) = cfg.model {
+                                println!("Current: {}", m);
+                            } else {
+                                println!("Current: (none set)");
+                            }
+                            println!("Supported:");
+                            for (id, desc) in &supported {
+                                println!("  {}  {}", id, desc);
+                            }
+                            println!();
+                            println!("Run 'mk use <model-name>' to use one of the available models.");
                         }
                     }
                     return Ok(());
@@ -1105,7 +1071,7 @@ async fn main() -> Result<()> {
                 _ => {}
             }
 
-            let commands_need_server = !matches!(cmd, CliCommand::Help | CliCommand::Schema { .. } | CliCommand::Use { .. } | CliCommand::Serve { .. } | CliCommand::Stop { .. });
+            let commands_need_server = !matches!(cmd, CliCommand::Help | CliCommand::Schema { .. } | CliCommand::Use { .. } | CliCommand::Models | CliCommand::Serve { .. } | CliCommand::Stop { .. });
             if commands_need_server {
                 cli_client::require_server(&cfg).await?;
             }
@@ -1128,11 +1094,11 @@ async fn main() -> Result<()> {
                     let out = cli_client::remove(&cfg, &path_str).await?;
                     if ctx.output_format != OutputFormat::Json {
                         if let Some(job_id) = out.get("job").and_then(|j| j.get("id")).and_then(|v| v.as_str()) {
-                            if crate::term::color_stdout() {
-                                println!("{} ({}). Run 'mk status' to check progress.", "Removal started".green(), job_id);
-                            } else {
-                                println!("Removal started ({}). Run 'mk status' to check progress.", job_id);
-                            }
+                            println!(
+                                "{} ({}). Run 'mk status' to check progress.",
+                                crate::term::style_stdout("Removal started", |s| s.green().to_string()),
+                                job_id
+                            );
                         }
                     }
                     Ok(CommandOut::Output(out))
@@ -1149,7 +1115,7 @@ async fn main() -> Result<()> {
                             println!("{}", serde_json::to_string_pretty(&out)?);
                             Ok(CommandOut::Done)
                         } else {
-                            let pack_root = resolve_pack_root(pack.as_deref())?;
+                            let pack_root = ensure_pack_root(pack.as_deref())?;
                             let mut body = body.clone();
                             if let Some(obj) = body.as_object_mut() {
                                 obj.insert("path".to_string(), serde_json::Value::String(pack_root.to_string_lossy().to_string()));
@@ -1161,7 +1127,9 @@ async fn main() -> Result<()> {
                             Ok(CommandOut::Output(out))
                         }
                     } else {
-                        let path = local_path.as_deref().unwrap();
+                        let path = local_path
+                            .as_deref()
+                            .ok_or_else(|| anyhow!("missing add path"))?;
                         if ctx.dry_run {
                             let pack_display = pack.as_deref().unwrap_or("(default)");
                             let out = serde_json::json!({
@@ -1177,16 +1145,7 @@ async fn main() -> Result<()> {
                             let source = PathBuf::from(path)
                                 .canonicalize()
                                 .with_context(|| format!("path not found: {}", path))?;
-                            let pack_root = resolve_pack_root(pack.as_deref())?;
-                            let pack_dir = pack_dir_for_path(&pack_root);
-                            if !pack_dir.join("manifest.json").exists() {
-                                anyhow::bail!(
-                                    "no memory pack at {}. run `mk index {}` first",
-                                    pack_root.display(),
-                                    pack_root.display()
-                                );
-                            }
-                            // Never add home directory as a source (e.g. pack at ~/.memkit must not index ~).
+                            let pack_root = ensure_pack_root(pack.as_deref())?;
                             let home = dirs::home_dir().context("home directory not available")?;
                             let home_canon = home.canonicalize().unwrap_or(home.clone());
                             if source == home_canon {
@@ -1194,28 +1153,29 @@ async fn main() -> Result<()> {
                                     "Cannot add home directory as a source. Add specific directories (e.g. mk add ~/Documents/...) instead."
                                 );
                             }
-                            // Register source by path (index in place; no copy into .memkit/sources).
-                            let root_path = if source.is_dir() {
-                                source.to_string_lossy().to_string()
-                            } else {
-                                source
-                                    .parent()
-                                    .map(|p| p.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| source.to_string_lossy().to_string())
-                            };
-                            add_source_root(&pack_dir, &root_path)?;
-                            if crate::term::color_stdout() {
-                                println!("{} {}", "Added source".green(), source.display());
-                            } else {
-                                println!("Added source {}", source.display());
+                            let path_str = source.to_string_lossy().to_string();
+                            let mut body = serde_json::json!({ "path": path_str });
+                            if pack.is_some() {
+                                body["pack"] = serde_json::json!(pack_root.to_string_lossy().to_string());
                             }
-                            // Trigger index for this pack by path to the pack dir (never send pack root/home).
-                            let index_path = pack_dir
-                                .canonicalize()
-                                .unwrap_or_else(|_| pack_dir.clone())
-                                .to_string_lossy()
-                                .to_string();
-                            let out = cli_client::index(&cfg, &index_path, None, false, ctx.output_format == OutputFormat::Json).await?;
+                            let out = cli_client::add(&cfg, &body).await?;
+                            if ctx.output_format != OutputFormat::Json {
+                                if let Some(job_id) = out.get("job").and_then(|j| j.get("id")).and_then(serde_json::Value::as_str) {
+                                    println!(
+                                        "{} ({}). Waiting for indexing to finish...",
+                                        crate::term::style_stdout("Adding", |s| s.green().to_string()),
+                                        job_id
+                                    );
+                                }
+                            }
+                            if out.get("job").is_some() && !ctx.dry_run {
+                                let pack_path = pack_root.to_string_lossy().to_string();
+                                cli_client::poll_until_index_done(&cfg, &pack_path).await?;
+                                if ctx.output_format != OutputFormat::Json {
+                                    let data = cli_client::status(&cfg, Some(&pack_path)).await?;
+                                    cli_client::print_status(&data);
+                                }
+                            }
                             Ok(CommandOut::Output(out))
                         }
                     }
@@ -1247,27 +1207,6 @@ async fn main() -> Result<()> {
                     }
                     Ok(CommandOut::Done)
                 }
-                CliCommand::Index { dir, name } => {
-                    let index_dir = PathBuf::from(&dir)
-                        .canonicalize()
-                        .with_context(|| format!("path not found: {}", dir))?;
-                    let home = dirs::home_dir().context("home directory not available")?;
-                    let home_canon = home.canonicalize().unwrap_or(home);
-                    if index_dir == home_canon {
-                        anyhow::bail!(
-                            "Indexing your home directory is not allowed. Add specific directories with 'mk add <path>' instead."
-                        );
-                    }
-                    let out = cli_client::index(&cfg, &dir, name.as_deref(), ctx.dry_run, ctx.output_format == OutputFormat::Json).await?;
-                    if !ctx.dry_run {
-                        cli_client::poll_until_index_done(&cfg, &dir).await?;
-                    }
-                    Ok(CommandOut::Output(out))
-                }
-                CliCommand::Graph { pack: _ } => {
-                    cli_client::graph_show(&cfg).await?;
-                    Ok(CommandOut::Done)
-                }
                 CliCommand::Publish { pack, destination } => {
                     let out = cli_client::publish(
                         &cfg,
@@ -1286,13 +1225,14 @@ async fn main() -> Result<()> {
                     let use_formatted = !raw && ctx.output_format != OutputFormat::Json;
                     if use_formatted {
                         if let Some(synth_err) = out.get("synthesis_error").and_then(serde_json::Value::as_str) {
-                            if crate::term::color_stdout() {
-                                println!("{}", "Retrieval succeeded; synthesis failed:".yellow());
-                                println!("  {}", synth_err);
-                            } else {
-                                println!("Retrieval succeeded; synthesis failed:");
-                                println!("  {}", synth_err);
-                            }
+                            println!(
+                                "{}",
+                                crate::term::style_stdout(
+                                    "Retrieval succeeded; synthesis failed:",
+                                    |s| s.yellow().to_string()
+                                )
+                            );
+                            println!("  {}", synth_err);
                             if let Some(results) = out.get("results").and_then(serde_json::Value::as_array) {
                                 if !results.is_empty() {
                                     println!();
@@ -1301,11 +1241,12 @@ async fn main() -> Result<()> {
                                         let path = r.get("file_path").and_then(serde_json::Value::as_str).unwrap_or("?");
                                         let content = r.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
                                         let preview = if content.len() > 120 { format!("{}...", &content[..120]) } else { content.to_string() };
-                                        if crate::term::color_stdout() {
-                                            println!("  {}. {} {}", i + 1, path.dimmed(), preview.dimmed());
-                                        } else {
-                                            println!("  {}. {} {}", i + 1, path, preview);
-                                        }
+                                        println!(
+                                            "  {}. {} {}",
+                                            i + 1,
+                                            crate::term::style_stdout(path, |s| s.dimmed().to_string()),
+                                            crate::term::style_stdout(&preview, |s| s.dimmed().to_string())
+                                        );
                                     }
                                 }
                             }
@@ -1317,13 +1258,17 @@ async fn main() -> Result<()> {
                                         let path = r.get("file_path").and_then(serde_json::Value::as_str).unwrap_or("?");
                                         let score = r.get("score").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
                                         let content = r.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
-                                        if crate::term::color_stdout() {
-                                            println!("  {}. {} score={:.3}", i + 1, path.dimmed(), score);
-                                            println!("{}", wrap_retrieval_preview(content, 72, 200).dimmed());
-                                        } else {
-                                            println!("  {}. {} score={:.3}", i + 1, path, score);
-                                            println!("{}", wrap_retrieval_preview(content, 72, 200));
-                                        }
+                                        println!(
+                                            "  {}. {} score={:.3}",
+                                            i + 1,
+                                            crate::term::style_stdout(path, |s| s.dimmed().to_string()),
+                                            score
+                                        );
+                                        let wrapped = wrap_retrieval_preview(content, 72, 200);
+                                        println!(
+                                            "{}",
+                                            crate::term::style_stdout(&wrapped, |s| s.dimmed().to_string())
+                                        );
                                     }
                                 }
                             }
@@ -1360,7 +1305,7 @@ async fn main() -> Result<()> {
                         Ok(CommandOut::Output(out))
                     }
                 }
-                CliCommand::Help | CliCommand::Schema { .. } | CliCommand::Use { .. } | CliCommand::Serve { .. } | CliCommand::Stop { .. } => unreachable!(),
+                CliCommand::Help | CliCommand::Schema { .. } | CliCommand::Use { .. } | CliCommand::Models | CliCommand::Serve { .. } | CliCommand::Stop { .. } => unreachable!(),
             };
             let command_out = result?;
             if let CommandOut::Output(out) = command_out {

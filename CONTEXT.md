@@ -14,11 +14,10 @@ All commands that accept parameters support `--json` with a single JSON object. 
 
 ```bash
 mk add --json '{"path":"./specs","pack":"./memory-pack"}'
-mk index --json '{"dir":"./memory-pack"}'
 mk query --json '{"query":"how does auth work","mode":"hybrid","top_k":8}'
 mk status --json '{"dir":"./memory-pack"}'
 mk remove --json '{"dir":"./memory-pack"}'
-mk graph --json '{"pack":"./memory-pack"}'
+mk publish --json '{"path":"./memory-pack","destination":"s3://bucket/prefix"}'
 ```
 
 ### Use `--output json` for machine-readable output
@@ -33,11 +32,11 @@ mk query "x" --output json
 
 ### Use `--dry-run` before mutating operations
 
-Mutating commands: `add`, `remove`, `index`. Use `--dry-run` to validate without side effects.
+Mutating commands: `add`, `remove`. Use `--dry-run` to validate without side effects.
 
 ```bash
 mk add --json '{"path":"./new-dir"}' --dry-run
-mk index --json '{"dir":"./memory-pack"}' --dry-run
+mk remove --json '{"dir":"./memory-pack"}' --dry-run
 ```
 
 ### Schema introspection
@@ -67,12 +66,18 @@ Assume inputs are validated; do not rely on the CLI to accept adversarial string
 | add | `path` | `pack` |
 | remove | — | `dir` |
 | status | — | `dir` |
-| index | `dir` | — |
-| graph | — | `pack` |
 | query | `query` | `mode`, `top_k`, `raw`, `pack` |
+| publish | — | `path`, `destination` |
+| use | — | `pack` |
+| models | — | — |
 
 ## Environment
 
 - `OUTPUT_FORMAT=json` — Equivalent to `--output json` for all commands.
 - `API_PORT` (default `4242`) — Server port.
 - `API_HOST` (default `127.0.0.1`) — Server host.
+
+## Local config
+
+- Config file path: `~/.config/memkit/memkit.json` (or `$XDG_CONFIG_HOME/memkit/memkit.json`)
+- Current supported field: `model` (optional default model id)

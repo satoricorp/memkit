@@ -82,7 +82,7 @@ pub async fn require_server(cfg: &ServerConfig) -> Result<()> {
     ))
 }
 
-/// Poll /status until the index job is no longer active (or timeout). Use after POST /index.
+/// Poll /status until the index job is no longer active (or timeout). Use after POST /add (add directory).
 pub async fn poll_until_index_done(cfg: &ServerConfig, pack_path: &str) -> Result<()> {
     const POLL_INTERVAL: Duration = Duration::from_secs(2);
     const MAX_WAIT: Duration = Duration::from_secs(7200); // 2 hours
@@ -370,52 +370,6 @@ pub async fn list(cfg: &ServerConfig, output_json: bool) -> Result<Value> {
     Ok(json!({"packs": reg.packs}))
 }
 
-pub async fn index(cfg: &ServerConfig, path: &str, name: Option<&str>, dry_run: bool, output_json: bool) -> Result<Value> {
-    if dry_run {
-        return Ok(json!({
-            "dry_run": true,
-            "would": "index",
-            "path": path,
-            "name": name,
-            "status": "skipped"
-        }));
-    }
-    let client = index_http_client()?;
-    let url = format!("{}/index", cfg.base_url());
-    let mut body = json!({"path": path});
-    if let Some(n) = name {
-        body["name"] = json!(n);
-    }
-    let resp = client.post(url).json(&body).send().await?;
-    let status = resp.status();
-    let body = resp.text().await?;
-    if !status.is_success() {
-        let hint = if body.contains("INDEX_HOME_REFUSED") {
-            "Use the mk binary from this repo and stop any old server: (1) lsof -i :4242 then kill <pid> (2) from repo root: cargo run -- mk add <path>"
-        } else {
-            "Stop any running mk server (kill the process on the API port), then run again from repo: cargo run -- mk add <path>."
-        };
-        return Err(anyhow!("index request failed: {}. {}", body, hint));
-    }
-    let out: Value = serde_json::from_str(&body)?;
-    if !output_json {
-        if let Some(job) = out.get("job").and_then(|j| j.get("id")).and_then(Value::as_str) {
-            if term::color_stdout() {
-                println!(
-                    "{} {} ({}). Run 'mk status {}' to check progress.",
-                    "Indexing".green(),
-                    path,
-                    job,
-                    path
-                );
-            } else {
-                println!("Indexing {} ({}). Run 'mk status {}' to check progress.", path, job, path);
-            }
-        }
-    }
-    Ok(out)
-}
-
 pub async fn remove(cfg: &ServerConfig, path: &str) -> Result<Value> {
     let client = index_http_client()?;
     let url = format!("{}/remove", cfg.base_url());
@@ -470,12 +424,6 @@ pub async fn query(cfg: &ServerConfig, args: &QueryArgs, pack: Option<&str>) -> 
     Ok(serde_json::from_str(&body)?)
 }
 
-pub async fn graph_show(cfg: &ServerConfig) -> Result<()> {
-    let url = format!("{}/graph/view", cfg.base_url());
-    opener::open(url).context("failed to open graph view in browser")?;
-    Ok(())
-}
-
 pub async fn publish(
     cfg: &ServerConfig,
     pack: Option<&str>,
@@ -504,11 +452,11 @@ pub async fn publish(
     let out: Value = serde_json::from_str(&resp_body)?;
     if !output_json {
         if let Some(uri) = out.get("uri").and_then(Value::as_str) {
-            if term::color_stdout() {
-                println!("{} {}", "Published to".green(), uri);
-            } else {
-                println!("Published to {}", uri);
-            }
+            println!(
+                "{} {}",
+                term::style_stdout("Published to", |s| s.green().to_string()),
+                uri
+            );
         }
     }
     Ok(out)
@@ -537,23 +485,19 @@ pub async fn add(cfg: &ServerConfig, body: &serde_json::Value) -> Result<Value> 
 /// Print add result: "Added N chunks." when synchronous success, or "Adding (job-N)..." when async job.
 pub fn print_add_started(data: &Value, pack_path: &str) {
     if let Some(n) = data.get("result").and_then(|r| r.get("chunks_added")).and_then(Value::as_u64) {
-        if term::color_stdout() {
-            println!("{} {}", "Added".green(), format!("{} chunks.", n).cyan());
-        } else {
-            println!("Added {} chunks.", n);
-        }
+        println!(
+            "{} {}",
+            term::style_stdout("Added", |s| s.green().to_string()),
+            term::style_stdout(&format!("{} chunks.", n), |s| s.cyan().to_string())
+        );
         return;
     }
     if let Some(job_id) = data.get("job").and_then(|j| j.get("id")).and_then(Value::as_str) {
-        if term::color_stdout() {
-            println!(
-                "{} ({}). Run 'mk status {}' to check progress.",
-                "Adding".green(),
-                job_id,
-                pack_path
-            );
-        } else {
-            println!("Adding ({}). Run 'mk status {}' to check progress.", job_id, pack_path);
-        }
+        println!(
+            "{} ({}). Run 'mk status {}' to check progress.",
+            term::style_stdout("Adding", |s| s.green().to_string()),
+            job_id,
+            pack_path
+        );
     }
 }
