@@ -24,6 +24,7 @@ mk serve --pack ./memory-pack
 mk serve --pack ./pack1,./pack2
 
 # CLI commands (require server to be running)
+mk list
 mk status
 mk status ~/memory
 mk add ~/Documents/project-notes
@@ -35,13 +36,12 @@ mk doctor
 
 - `mk add <path-or-url> [--pack <name-or-path>]` — Add local files or URL/docs to a pack.
 - `mk remove [dir]` — Remove a pack (prompts unless `--yes`).
+- `mk list` — Registered packs (same listing as `mk status` with no `dir`) plus current and supported model IDs.
 - `mk status [dir]` — Without `dir`: list all registered packs. With `dir`: status for that pack.
 - `mk query "<text>" [--pack <name-or-path>] [--top-k N] [--no-rerank] [--raw]` — Query a pack.
 - `mk publish [--pack <name-or-path>] [--destination s3://bucket/prefix]` — Publish pack artifacts.
-- `mk use` — Show default pack and default model.
-- `mk use pack [name-or-path]` — Show or set default pack.
-- `mk use model [model-id]` — Show or set default model (see `mk models`).
-- `mk models` — Show current model and supported model IDs.
+- `mk use pack <name-or-path>` — Set default pack.
+- `mk use model <model-id>` — Set default model (see `mk list` for IDs).
 - `mk doctor` — Config path and whether the API is reachable (`GET /health`).
 - `mk serve [--pack <path>] [--host] [--port] [--foreground]` — Start server (background by default).
 - `mk stop [--port]` — Stop background server on the configured port.

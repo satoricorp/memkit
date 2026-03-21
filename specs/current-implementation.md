@@ -23,11 +23,11 @@ This file is the authoritative current-state reference for runtime behavior.
 - `mk add`
 - `mk remove`
 - `mk status`
-- `mk status` (no `dir` lists packs; replaces former `mk list`)
+- `mk status` (no `dir` lists packs only)
+- `mk list` (packs + current/supported models)
 - `mk query`
 - `mk publish`
-- `mk use`
-- `mk models`
+- `mk use pack <name>` / `mk use model <id>` (shell); JSON `use` still supports show/set
 - `mk serve`
 - `mk stop`
 - `mk schema`

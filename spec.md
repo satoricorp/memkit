@@ -84,14 +84,14 @@ README.md, CONTEXT.md
 ## CLI & schema (agents)
 
 - **One JSON entry point:** `mk --json | -j '<object>'` with a required **`command`** field. Per-subcommand `--json` was removed; agents should not rely on `mk add --json`.
-- **`mk list`** removed — use **`mk status`** with no `dir` (same registry listing).
-- **`mk use`** is explicit: **`mk use pack`** / **`mk use model`**, or JSON `use` with **`pack`** / **`model`** keys (`null` = show, string = set).
+- **`mk list`** — registered packs (same core listing as **`mk status`** with no `dir`) plus current and supported models; replaces **`mk models`**.
+- **`mk use` (shell):** **`mk use pack <name>`** / **`mk use model <id>`** only (set defaults). JSON **`use`** still accepts **`pack`** / **`model`** (`null` = show, string = set).
 - **`mk doctor`** — local checks: config path, `GET /health` against `API_HOST`:`API_PORT`.
 - **`mk schema`** — lists commands with schemas; includes **`publish`** and **`doctor`**. JSON Schema–style strictness can be added later (see plan below).
 
 ### Schema evolution plan
 
-1. **Done:** `schema_for_command` documents `add`, `remove`, `status`, `query`, `publish`, `use`, `models`, `doctor`; `use` describes `pack` / `model` semantics.
+1. **Done:** `schema_for_command` documents `add`, `remove`, `status`, `query`, `publish`, `use`, `list`, `doctor`; `use` describes `pack` / `model` semantics.
 2. **Next:** Optional **JSON Schema** export (`mk schema --format json-schema`) for validation in CI or agent loops.
 3. **Next:** Mark `required` arrays per command to match runtime validation exactly.
 

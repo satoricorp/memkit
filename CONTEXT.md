@@ -16,11 +16,13 @@ mk -j '{"command":"query","query":"how does auth work","top_k":8}'
 mk -j '{"command":"status","dir":"./memory-pack"}'
 mk -j '{"command":"use","pack":null}'
 mk -j '{"command":"use","model":"openai:gpt-5.2"}'
+mk -j '{"command":"list"}'
 mk -j '{"command":"doctor"}'
 ```
 
-- **`use`**: omit both `pack` and `model` to show defaults for both; `null` on one key shows only that field; strings set pack or model.
-- **`status`**: omit `dir` to list all registered packs (same as former `mk list`).
+- **`list`**: packs registered packs plus current/supported model IDs (no input fields).
+- **`use`**: omit both `pack` and `model` to show defaults for both; `null` on one key shows only that field; strings set pack or model. Shell argv only supports `mk use pack <name>` and `mk use model <id>` (set).
+- **`status`**: omit `dir` to list all registered packs (pack-only; use **`list`** for packs + models).
 
 ### Use `--output json` for machine-readable output
 
@@ -71,7 +73,7 @@ Assume inputs are validated; do not rely on the CLI to accept adversarial string
 | query     | `query`     | `top_k`, `use_reranker`, `raw`, `pack` |
 | publish   | —           | `pack` / `path`, `destination` |
 | use       | —           | `pack`, `model` (see above) |
-| models    | —           | — |
+| list      | —           | — |
 | doctor    | —           | — |
 
 ## Environment
