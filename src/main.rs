@@ -1,4 +1,5 @@
 mod add_docs;
+mod cli;
 mod cli_client;
 mod config;
 #[cfg(feature = "helix")]
@@ -13,7 +14,7 @@ mod term;
 mod google;
 mod indexer;
 mod ontology;
-mod ontology_candle;
+#[cfg(feature = "llama-embedded")]
 mod ontology_llama;
 mod pack;
 mod pack_location;
@@ -83,7 +84,8 @@ fn parse_global_flags(args: &[String]) -> (Vec<String>, CliContext) {
 use colored_json::to_colored_json_auto;
 use owo_colors::OwoColorize;
 
-use crate::cli_client::{ServerConfig, QueryArgs};
+use crate::cli::types::{CliCommand, ServeConfig, UseField, UseSpec};
+use crate::cli_client::{QueryArgs, ServerConfig};
 use crate::pack::{has_manifest_at, init_pack};
 use crate::registry::{ensure_registered, load_registry, pack_dir_for_path, resolve_pack_by_name_or_path, set_default};
 use crate::server::run_server;
@@ -139,45 +141,6 @@ fn trim_add_response_content(out: &serde_json::Value) -> serde_json::Value {
         }
     }
     v
-}
-
-struct ServeConfig {
-    packs: Vec<PathBuf>,
-    host: String,
-    port: u16,
-}
-
-enum CliCommand {
-    Add {
-        local_path: Option<String>,
-        pack: Option<String>,
-        api_request: Option<serde_json::Value>,
-    },
-    Remove { dir: Option<String>, yes: bool },
-    Status { dir: Option<String> },
-    List,
-    Query {
-        query: String,
-        top_k: usize,
-        use_reranker: bool,
-        raw: bool,
-        pack: Option<String>,
-    },
-    Schema { command: Option<String> },
-    Publish {
-        pack: Option<String>,
-        destination: Option<String>,
-    },
-    Use { pack: Option<String> },
-    Models,
-    Serve {
-        pack: Option<String>,
-        host: Option<String>,
-        port: Option<u16>,
-        foreground: bool,
-    },
-    Stop { port: Option<u16> },
-    Help,
 }
 
 fn resolve_pack_root(pack_arg: Option<&str>) -> Result<PathBuf> {
@@ -245,22 +208,42 @@ fn parse_pack_paths(value: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-fn extract_json_from_args(args: &[String]) -> (Option<serde_json::Value>, Vec<String>) {
-    let mut filtered = Vec::new();
-    let mut json_value = None;
-    let mut i = 0;
-    while i < args.len() {
-        if args.get(i).map(|s| s.as_str()) == Some("--json") && i + 1 < args.len() {
-            if let Ok(v) = serde_json::from_str(args[i + 1].as_str()) {
-                json_value = Some(v);
-            }
-            i += 2;
-        } else {
-            filtered.push(args[i].clone());
-            i += 1;
-        }
+fn is_agent_json_flag(s: &str) -> bool {
+    matches!(s, "--json" | "-j")
+}
+
+fn parse_use_field_json(v: Option<&serde_json::Value>) -> Result<UseField> {
+    match v {
+        None => Ok(UseField::Absent),
+        Some(serde_json::Value::Null) => Ok(UseField::Show),
+        Some(serde_json::Value::String(s)) => Ok(UseField::Set(s.clone())),
+        _ => Err(anyhow!("use: pack and model must be null or a string")),
     }
-    (json_value, filtered)
+}
+
+/// `{"command":"use"}` with optional `"pack"` / `"model"` (null = show, string = set).
+fn cli_use_from_json(j: &serde_json::Value) -> Result<CliCommand> {
+    let obj = j.as_object().ok_or_else(|| anyhow!("--json must be a JSON object"))?;
+    let has_pack = obj.contains_key("pack");
+    let has_model = obj.contains_key("model");
+    if !has_pack && !has_model {
+        return Ok(CliCommand::Use(UseSpec {
+            pack: UseField::Show,
+            model: UseField::Show,
+        }));
+    }
+    Ok(CliCommand::Use(UseSpec {
+        pack: if has_pack {
+            parse_use_field_json(obj.get("pack"))?
+        } else {
+            UseField::Absent
+        },
+        model: if has_model {
+            parse_use_field_json(obj.get("model"))?
+        } else {
+            UseField::Absent
+        },
+    }))
 }
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
@@ -397,7 +380,6 @@ fn cli_command_from_json(cmd: &str, j: &serde_json::Value) -> Result<CliCommand>
             }
             Ok(CliCommand::Status { dir })
         }
-        "list" => Ok(CliCommand::List),
         "query" => {
             let query = get_str("query").ok_or_else(|| anyhow!("--json must include \"query\""))?;
             crate::validate::reject_control_chars(&query)?;
@@ -411,9 +393,19 @@ fn cli_command_from_json(cmd: &str, j: &serde_json::Value) -> Result<CliCommand>
             pack: get_str("pack").or_else(|| get_str("path")),
             destination: get_str("destination"),
         }),
-        "schema" => Ok(CliCommand::Schema { command: get_str("schema") }),
-        "use" => Ok(CliCommand::Use { pack: get_str("pack") }),
+        "schema" => {
+            let format = match get_str("format") {
+                Some(f) => crate::cli::schema::schema_format_from_str(&f)?,
+                None => crate::cli::schema::SchemaFormat::Memkit,
+            };
+            Ok(CliCommand::Schema {
+                command: get_str("schema"),
+                format,
+            })
+        }
+        "use" => cli_use_from_json(j),
         "models" => Ok(CliCommand::Models),
+        "doctor" => Ok(CliCommand::Doctor),
         "help" | "--help" | "-h" => Ok(CliCommand::Help),
         other => Err(anyhow!("unknown command: {}. run `mk help` for usage", other)),
     }
@@ -424,10 +416,10 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
         return Ok(CliCommand::Help);
     }
 
-    // Top-level mk --json '{...}' — object must include "command" and command-specific fields
-    if args[0] == "--json" && args.len() >= 2 {
+    // Agent mode: mk --json | -j '<one JSON object with "command">'
+    if args.len() >= 2 && is_agent_json_flag(&args[0]) {
         let j: serde_json::Value = serde_json::from_str(&args[1])
-            .map_err(|e| anyhow!("invalid --json: {}", e))?;
+            .map_err(|e| anyhow!("invalid JSON after {}: {}", args[0], e))?;
         let command = j
             .get("command")
             .and_then(serde_json::Value::as_str)
@@ -437,15 +429,12 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
 
     match args[0].as_str() {
         "add" => {
-            let (json_val, rest) = extract_json_from_args(&args[1..]);
-            let pack_from_rest = flag_value(&rest, "--pack");
-            if let Some(j) = json_val {
-                return parse_add_command(&j, pack_from_rest);
-            }
+            let rest = &args[1..];
+            let pack_from_rest = flag_value(rest, "--pack");
             let arg = rest
                 .first()
                 .cloned()
-                .ok_or_else(|| anyhow!("usage: mk add <path-or-url> [--pack <dir>] or mk add --json '{{\"path\":\"...\"}}' or mk add --json '{{\"documents\":[...]}}'"))?;
+                .ok_or_else(|| anyhow!("usage: mk add <path-or-url> [--pack <dir>] — or mk --json '{{\"command\":\"add\",...}}'"))?;
             if arg.starts_with("http://") || arg.starts_with("https://") {
                 let doc_type = doc_type_for_url(&arg);
                 let api_request = serde_json::json!({
@@ -465,17 +454,9 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
             })
         }
         "remove" => {
-            let (json_val, rest) = extract_json_from_args(&args[1..]);
+            let rest = &args[1..];
             let mut yes = false;
             let mut dir = None::<String>;
-            if let Some(j) = json_val {
-                dir = j.get("dir").and_then(serde_json::Value::as_str).map(String::from);
-                if let Some(ref d) = dir {
-                    crate::validate::validate_path(d)?;
-                }
-                yes = j.get("confirm").and_then(serde_json::Value::as_bool).unwrap_or(false);
-                return Ok(CliCommand::Remove { dir, yes });
-            }
             let mut i = 0usize;
             while i < rest.len() {
                 match rest[i].as_str() {
@@ -497,49 +478,18 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
             Ok(CliCommand::Remove { dir, yes })
         }
         "status" => {
-            let (json_val, rest) = extract_json_from_args(&args[1..]);
-            if let Some(j) = json_val {
-                let dir = j.get("dir").and_then(serde_json::Value::as_str).map(String::from);
-                if let Some(ref d) = dir {
-                    crate::validate::validate_path(d)?;
-                }
-                return Ok(CliCommand::Status { dir });
-            }
+            let rest = &args[1..];
             let dir = rest.first().cloned();
             if let Some(ref d) = dir {
                 crate::validate::validate_path(d)?;
             }
             Ok(CliCommand::Status { dir })
         }
-        "list" => Ok(CliCommand::List),
         "query" => {
-            let (json_val, rest) = extract_json_from_args(&args[1..]);
-            if let Some(j) = json_val {
-                let query = j
-                    .get("query")
-                    .and_then(serde_json::Value::as_str)
-                    .map(String::from)
-                    .ok_or_else(|| anyhow!("--json must include \"query\""))?;
-                crate::validate::reject_control_chars(&query)?;
-                let top_k = j
-                    .get("top_k")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(8) as usize;
-                let use_reranker =
-                    j.get("use_reranker").and_then(serde_json::Value::as_bool).unwrap_or(true);
-                let raw = j.get("raw").and_then(serde_json::Value::as_bool).unwrap_or(false);
-                let pack = j.get("pack").and_then(serde_json::Value::as_str).map(String::from);
-                return Ok(CliCommand::Query {
-                    query,
-                    top_k,
-                    use_reranker,
-                    raw,
-                    pack,
-                });
-            }
+            let rest = &args[1..];
             if rest.is_empty() {
                 return Err(anyhow!(
-                    "usage: mk query <text> [--top-k N] [--no-rerank] [--pack <name-or-path>] [--raw] or mk query --json '{{\"query\":\"...\"}}'"
+                    "usage: mk query <text> [--top-k N] [--no-rerank] [--pack <name-or-path>] [--raw] — or mk --json '{{\"command\":\"query\",\"query\":\"...\"}}'"
                 ));
             }
             let query = rest[0].clone();
@@ -580,31 +530,60 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
             })
         }
         "publish" => {
-            let (json_val, rest) = extract_json_from_args(&args[1..]);
-            if let Some(j) = json_val {
-                let path = j.get("path").and_then(serde_json::Value::as_str).map(String::from);
-                let destination = j.get("destination").and_then(serde_json::Value::as_str).map(String::from);
-                return Ok(CliCommand::Publish {
-                    pack: path,
-                    destination,
-                });
-            }
-            let pack = flag_value(&rest, "--pack");
-            let destination = flag_value(&rest, "--destination");
+            let rest = &args[1..];
+            let pack = flag_value(rest, "--pack");
+            let destination = flag_value(rest, "--destination");
             Ok(CliCommand::Publish { pack, destination })
         }
         "schema" => {
-            let command = args.get(1).cloned();
-            Ok(CliCommand::Schema { command })
+            let rest = &args[1..];
+            let mut format = crate::cli::schema::SchemaFormat::Memkit;
+            let mut i = 0usize;
+            while i + 1 < rest.len() && rest[i] == "--format" {
+                format = crate::cli::schema::schema_format_from_str(&rest[i + 1])?;
+                i += 2;
+            }
+            let command = rest.get(i).cloned();
+            Ok(CliCommand::Schema { command, format })
         }
         "use" => {
-            let mut pack = flag_value(&args[1..], "--pack");
-            if pack.is_none() {
-                pack = args[1..].iter().find(|a| !a.starts_with('-')).cloned();
+            let rest = &args[1..];
+            if rest.is_empty() {
+                return Ok(CliCommand::Use(UseSpec {
+                    pack: UseField::Show,
+                    model: UseField::Show,
+                }));
             }
-            Ok(CliCommand::Use { pack })
+            match rest[0].as_str() {
+                "pack" => match rest.len() {
+                    1 => Ok(CliCommand::Use(UseSpec {
+                        pack: UseField::Show,
+                        model: UseField::Absent,
+                    })),
+                    2 => Ok(CliCommand::Use(UseSpec {
+                        pack: UseField::Set(rest[1].clone()),
+                        model: UseField::Absent,
+                    })),
+                    _ => Err(anyhow!("usage: mk use pack [name-or-path]")),
+                },
+                "model" => match rest.len() {
+                    1 => Ok(CliCommand::Use(UseSpec {
+                        pack: UseField::Absent,
+                        model: UseField::Show,
+                    })),
+                    2 => Ok(CliCommand::Use(UseSpec {
+                        pack: UseField::Absent,
+                        model: UseField::Set(rest[1].clone()),
+                    })),
+                    _ => Err(anyhow!("usage: mk use model [model-id]")),
+                },
+                _ => Err(anyhow!(
+                    "usage: mk use [pack|model] … — try `mk use pack <path>`, `mk use model <id>`, or `mk use` to show both"
+                )),
+            }
         }
         "models" => Ok(CliCommand::Models),
+        "doctor" => Ok(CliCommand::Doctor),
         "serve" => {
             let pack = flag_value(&args[1..], "--pack");
             let host = flag_value(&args[1..], "--host");
@@ -628,96 +607,69 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
     }
 }
 
-const SCHEMA_COMMANDS: &[&str] = &["add", "remove", "status", "query", "use", "models"];
-
-fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
-    Some(match cmd {
-        "add" => serde_json::json!({
-            "command": "add",
-            "input": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Local path to add, or pack path when using documents/conversation"},
-                    "pack": {"type": "string", "description": "Pack name or path (optional)"},
-                    "documents": {
-                        "type": "array",
-                        "description": "API add: list of { type: url|content|google_doc|google_sheet, value: string }"
-                    },
-                    "conversation": {
-                        "type": "array",
-                        "description": "API add: list of { role, content }"
-                    }
-                }
-            }
-        }),
-        "remove" => serde_json::json!({
-            "command": "remove",
-            "input": {
-                "type": "object",
-                "properties": {
-                    "dir": {"type": "string", "description": "Directory to remove pack from (optional)"}
-                }
-            }
-        }),
-        "status" => serde_json::json!({
-            "command": "status",
-            "input": {
-                "type": "object",
-                "properties": {
-                    "dir": {"type": "string", "description": "Pack directory (optional)"}
-                }
-            }
-        }),
-        "query" => serde_json::json!({
-            "command": "query",
-            "input": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Natural language query"},
-                    "top_k": {"type": "integer", "default": 8},
-                    "use_reranker": {"type": "boolean", "default": true},
-                    "raw": {"type": "boolean", "default": false},
-                    "pack": {"type": "string", "description": "Pack name or path (optional)"}
-                },
-                "required": ["query"]
-            }
-        }),
-        "use" => serde_json::json!({
-            "command": "use",
-            "input": {
-                "type": "object",
-                "properties": {
-                    "pack": {"type": "string", "description": "Pack name or path, or model id (e.g. openai:gpt-4o-mini) to set as default (optional; omit to show current default pack)"}
-                }
-            }
-        }),
-        "models" => serde_json::json!({
-            "command": "models",
-            "input": {},
-            "output": {
-                "current": "string | null",
-                "supported": [{"id": "string", "description": "string"}]
-            }
-        }),
-        _ => return None,
-    })
-}
-
-fn print_schema(cmd: Option<&str>) -> Result<()> {
-    match cmd {
-        None => {
-            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                "commands": SCHEMA_COMMANDS,
-                "usage": "mk schema <command>"
-            }))?);
+fn run_use(spec: &UseSpec) -> Result<()> {
+    match &spec.pack {
+        UseField::Set(name) => {
+            set_default(name)?;
+            println!(
+                "{} {}",
+                crate::term::style_stdout("Default pack set to", |s| s.green().to_string()),
+                name
+            );
         }
-        Some(c) => {
-            if let Some(schema) = schema_for_command(c) {
-                println!("{}", serde_json::to_string_pretty(&schema)?);
+        UseField::Show => {
+            let reg = load_registry()?;
+            if let Some(ref default_path) = reg.default_path {
+                let default_pack = reg.packs.iter().find(|p| p.path == *default_path);
+                let (name, path) = default_pack
+                    .map(|p| (p.name.as_deref().unwrap_or(p.path.as_str()), p.path.as_str()))
+                    .unwrap_or((default_path.as_str(), default_path.as_str()));
+                println!(
+                    "{} {}  {}",
+                    crate::term::style_stdout("Default pack:", |s| s.bold().to_string()),
+                    name,
+                    crate::term::style_stdout(path, |s| s.dimmed().to_string())
+                );
             } else {
-                anyhow::bail!("unknown schema: {}. available: {}", c, SCHEMA_COMMANDS.join(", "));
+                println!(
+                    "{}",
+                    crate::term::style_stdout("No default pack set", |s| s.yellow().to_string())
+                );
             }
         }
+        UseField::Absent => {}
+    }
+    match &spec.model {
+        UseField::Set(id) => {
+            if !config::is_supported_model(id) {
+                anyhow::bail!(
+                    "unknown model '{}'. run `mk models` to see supported models.",
+                    id
+                );
+            }
+            config::set_model(id)?;
+            println!(
+                "{} {}",
+                crate::term::style_stdout("Default model set to", |s| s.green().to_string()),
+                id
+            );
+        }
+        UseField::Show => {
+            let cfg = config::load_config().unwrap_or_default();
+            if let Some(ref m) = cfg.model {
+                println!(
+                    "{} {}",
+                    crate::term::style_stdout("Default model:", |s| s.bold().to_string()),
+                    m
+                );
+            } else {
+                println!(
+                    "{}",
+                    crate::term::style_stdout("No default model set", |s| s.yellow().to_string())
+                );
+            }
+        }
+        UseField::Absent => {}
     }
     Ok(())
 }
@@ -737,23 +689,24 @@ fn print_help() {
         "Usage:".to_string()
     };
     println!("{}", usage);
-    println!("  mk --json '{{\"command\":\"<cmd>\", ...}}'  (any command with flags as object fields)");
+    println!("  Agent JSON: mk -j '{{...}}'  (same as --json; object must include \"command\")");
     println!("  Global flags: [--output json|text] [--dry-run]");
     println!();
     let commands = [
-        "  mk --json '{\"command\":\"<cmd>\", ...}'",
+        "  mk --json | -j '{\"command\":\"<cmd>\", ...}'   (single JSON object; agent entry point)",
         "  mk add <path-or-url> [--pack <name-or-path>]",
-        "  mk add --json '{\"documents\":[{\"type\":\"url\",\"value\":\"...\"}],\"path\":\"...\"}'",
         "  mk remove [dir]",
-        "  mk status [dir]",
-        "  mk list",
+        "  mk status [dir]   (omit dir to list all registered packs)",
         "  mk query <text> [--top-k N] [--no-rerank] [--pack <name-or-path>] [--raw]",
         "  mk publish [--pack <name-or-path>] [--destination s3://bucket/prefix]",
-        "  mk use [name-or-path|model-name]",
-        "  mk models  (list current model and supported models; use 'mk use <model-name>' to set)",
-        "  mk serve [--pack <path>] [--host H] [--port P] [--foreground]  (run server in background; use --foreground to attach)",
-        "  mk stop [--port P]  (stop the background server)",
-        "  mk schema [command]",
+        "  mk use   (show default pack and model)",
+        "  mk use pack [name-or-path]   (show or set default pack)",
+        "  mk use model [model-id]   (show or set default model)",
+        "  mk models  (list supported model IDs)",
+        "  mk doctor  (config path + server /health reachability)",
+        "  mk serve [--pack <path>] [--host H] [--port P] [--foreground]",
+        "  mk stop [--port P]",
+        "  mk schema [--format json|json-schema] [command]",
     ];
     for cmd in commands {
         if color {
@@ -871,8 +824,8 @@ async fn main() -> Result<()> {
 
     match parse_cli_command(&args)? {
         CliCommand::Help => print_help(),
-        CliCommand::Schema { command } => {
-            print_schema(command.as_deref())?;
+        CliCommand::Schema { command, format } => {
+            crate::cli::schema::print_schema(command.as_deref(), format)?;
             return Ok(());
         }
         CliCommand::Serve { pack, host, port, foreground } => {
@@ -976,55 +929,8 @@ async fn main() -> Result<()> {
                     }
                     // Fall through to use server remove job (POST /remove).
                 }
-                CliCommand::Use { pack } => {
-                    if let Some(name_or_path) = pack.as_ref() {
-                        if name_or_path.contains(':') {
-                            if config::is_supported_model(name_or_path) {
-                                config::set_model(name_or_path)?;
-                                println!(
-                                    "{} {}",
-                                    crate::term::style_stdout(
-                                        "Default model set to",
-                                        |s| s.green().to_string()
-                                    ),
-                                    name_or_path
-                                );
-                                return Ok(());
-                            } else {
-                                anyhow::bail!(
-                                    "unknown model '{}'. run `mk models` to see supported models.",
-                                    name_or_path
-                                );
-                            }
-                        }
-                    }
-                    let reg = load_registry()?;
-                    if let Some(name_or_path) = pack {
-                        set_default(name_or_path)?;
-                        println!(
-                            "{} {}",
-                            crate::term::style_stdout("Default pack set to", |s| s.green().to_string()),
-                            name_or_path
-                        );
-                    } else {
-                        if let Some(ref default_path) = reg.default_path {
-                            let default_pack = reg.packs.iter().find(|p| p.path == *default_path);
-                            let (name, path) = default_pack
-                                .map(|p| (p.name.as_deref().unwrap_or(p.path.as_str()), p.path.as_str()))
-                                .unwrap_or((default_path.as_str(), default_path.as_str()));
-                            println!(
-                                "{} {}  {}",
-                                crate::term::style_stdout("Default pack:", |s| s.bold().to_string()),
-                                name,
-                                crate::term::style_stdout(path, |s| s.dimmed().to_string())
-                            );
-                        } else {
-                            println!(
-                                "{}",
-                                crate::term::style_stdout("No default pack set", |s| s.yellow().to_string())
-                            );
-                        }
-                    }
+                CliCommand::Use(spec) => {
+                    run_use(&spec)?;
                     return Ok(());
                 }
                 CliCommand::Models => {
@@ -1051,7 +957,7 @@ async fn main() -> Result<()> {
                                 println!("    {}  {}", id.cyan(), desc.dimmed());
                             }
                             println!();
-                            println!("  {}", "Run 'mk use <model-name>' to use one of the available models.".dimmed());
+                            println!("  {}", "Run 'mk use model <id>' to set a default model.".dimmed());
                         } else {
                             if let Some(ref m) = cfg.model {
                                 println!("Current: {}", m);
@@ -1063,7 +969,7 @@ async fn main() -> Result<()> {
                                 println!("  {}  {}", id, desc);
                             }
                             println!();
-                            println!("Run 'mk use <model-name>' to use one of the available models.");
+                            println!("Run 'mk use model <id>' to set a default model.");
                         }
                     }
                     return Ok(());
@@ -1071,7 +977,16 @@ async fn main() -> Result<()> {
                 _ => {}
             }
 
-            let commands_need_server = !matches!(cmd, CliCommand::Help | CliCommand::Schema { .. } | CliCommand::Use { .. } | CliCommand::Models | CliCommand::Serve { .. } | CliCommand::Stop { .. });
+            let commands_need_server = !matches!(
+                cmd,
+                CliCommand::Help
+                    | CliCommand::Schema { .. }
+                    | CliCommand::Use(_)
+                    | CliCommand::Models
+                    | CliCommand::Doctor
+                    | CliCommand::Serve { .. }
+                    | CliCommand::Stop { .. }
+            );
             if commands_need_server {
                 cli_client::require_server(&cfg).await?;
             }
@@ -1199,11 +1114,25 @@ async fn main() -> Result<()> {
                         Ok(CommandOut::Done)
                     }
                 }
-                CliCommand::List => {
-                    let output_json = ctx.output_format == OutputFormat::Json;
-                    let data = cli_client::list(&cfg, output_json).await?;
-                    if output_json {
+                CliCommand::Doctor => {
+                    let data = cli_client::doctor(&cfg).await?;
+                    if ctx.output_format == OutputFormat::Json {
                         println!("{}", serde_json::to_string_pretty(&data)?);
+                    } else {
+                        println!(
+                            "{}",
+                            crate::term::style_stdout("memkit doctor", |s| s.bold().cyan().to_string())
+                        );
+                        println!("config: {}", data["config_path"].as_str().unwrap_or(""));
+                        println!(
+                            "server {} ({})",
+                            if data["server_reachable"].as_bool().unwrap_or(false) {
+                                "reachable"
+                            } else {
+                                "not reachable"
+                            },
+                            data["server_url"].as_str().unwrap_or("")
+                        );
                     }
                     Ok(CommandOut::Done)
                 }
@@ -1305,7 +1234,7 @@ async fn main() -> Result<()> {
                         Ok(CommandOut::Output(out))
                     }
                 }
-                CliCommand::Help | CliCommand::Schema { .. } | CliCommand::Use { .. } | CliCommand::Models | CliCommand::Serve { .. } | CliCommand::Stop { .. } => unreachable!(),
+                CliCommand::Help | CliCommand::Schema { .. } | CliCommand::Use(_) | CliCommand::Models | CliCommand::Serve { .. } | CliCommand::Stop { .. } => unreachable!(),
             };
             let command_out = result?;
             if let CommandOut::Output(out) = command_out {
