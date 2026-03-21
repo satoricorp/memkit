@@ -13,7 +13,7 @@ Satori indexes **documents** (files, markdown, code) into a memory pack, but the
 
 The following criteria from existing specs must be met or supported to implement the benchmark suite.
 
-### From PRD (specs/prd-v1-local-memory.md)
+### From PRD (specs/legacy/prd-v1-local-memory.md)
 
 | Criterion | Target | Benchmark Relevance |
 |-----------|--------|---------------------|
@@ -24,7 +24,7 @@ The following criteria from existing specs must be met or supported to implement
 | Active indexing memory | ≤ 2.5 GB | Resource envelope benchmark |
 | Baseline hardware | MacBook Pro class | Reference machine for all benchmarks |
 
-### From Validation Plan (specs/validation-plan-v1.md)
+### From Validation Plan (specs/legacy/validation-plan-v1.md)
 
 | Criterion | Target | Benchmark Relevance |
 |-----------|--------|---------------------|
@@ -34,11 +34,11 @@ The following criteria from existing specs must be met or supported to implement
 | P50/P95 warm query latency | Vector and hybrid | Latency benchmark metrics |
 | Deterministic ordering | Hybrid retrieval | Reproducibility requirement |
 
-### From Architecture (specs/architecture-v1.md)
+### From Architecture (specs/legacy/architecture-v1.md)
 
 | Criterion | Target | Benchmark Relevance |
 |-----------|--------|---------------------|
-| Query pipeline stages | Embed → Retrieve (LanceDB + Falkor) → Rerank | Per-stage timing breakdown |
+| Query pipeline stages | Embed → Retrieve (Helix hybrid) → Rerank | Per-stage timing breakdown |
 | Retrieval strategy | Hybrid (vector + FTS) with citation-first output | Recall and ranking evaluation |
 
 ---
@@ -108,6 +108,12 @@ Benchmarks must exercise the same interfaces used in production:
 1. **CLI:** `satori query "<query>" [--mode vector|hybrid] [--top-k N]`
 2. **HTTP API:** `POST /query` with `query`, `mode`, `top_k`
 3. **SDK (future):** Programmatic query API—benchmarks should be designed so SDK clients can reuse the same query contract and dataset.
+
+---
+
+## Profiling the query pipeline
+
+Use `mk query` with `--output json` and inspect server logs / response `timings_ms` where exposed. For embed + rerank hot paths, profile a release build (`cargo build --release`) with your platform sampler (e.g. Instruments on macOS, `perf` on Linux) while running repeated queries against a fixed pack. Watch for duplicate embedding work between retrieve and rerank stages in `src/query.rs` / `src/rerank.rs`.
 
 ---
 

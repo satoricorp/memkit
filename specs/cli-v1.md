@@ -11,7 +11,7 @@ This document supersedes earlier CLI guidance that treated non-command interface
 - Command: `satori`
 - Primary interface: command-only CLI
 - Optional UIs are non-normative and must not replace command contracts
-- Local runtime scripts must auto-provision native Falkor sidecar artifacts (no manual Falkor install required)
+- Local runtime scripts (`scripts/local-start.sh`, etc.) start `mk serve` only; storage is Helix-backed (no separate graph DB sidecar in those scripts).
 
 ## Required Commands
 

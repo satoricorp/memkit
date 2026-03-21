@@ -6,48 +6,50 @@ This document provides guidance for AI agents invoking the memkit CLI (`mk`).
 
 memkit is a local memory pack CLI. The server must be running (`mk serve` or `./scripts/local-start.sh`) before most commands.
 
-## Agent-Friendly Usage
+## Agent JSON (single entry point)
 
-### Use `--json` for parameterized commands
-
-All commands that accept parameters support `--json` with a single JSON object. This avoids shell escaping and maps directly to the API.
+Use **one** JSON object with a **`command`** field. Pass it after **`--json`** or **`-j`**. Do **not** use `mk <cmd> --json` — that form was removed.
 
 ```bash
-mk add --json '{"path":"./specs","pack":"./memory-pack"}'
-mk query --json '{"query":"how does auth work","mode":"hybrid","top_k":8}'
-mk status --json '{"dir":"./memory-pack"}'
-mk remove --json '{"dir":"./memory-pack"}'
-mk publish --json '{"path":"./memory-pack","destination":"s3://bucket/prefix"}'
+mk -j '{"command":"add","path":"./specs","pack":"./memory-pack"}'
+mk -j '{"command":"query","query":"how does auth work","top_k":8}'
+mk -j '{"command":"status","dir":"./memory-pack"}'
+mk -j '{"command":"use","pack":null}'
+mk -j '{"command":"use","model":"openai:gpt-5.2"}'
+mk -j '{"command":"doctor"}'
 ```
+
+- **`use`**: omit both `pack` and `model` to show defaults for both; `null` on one key shows only that field; strings set pack or model.
+- **`status`**: omit `dir` to list all registered packs (same as former `mk list`).
 
 ### Use `--output json` for machine-readable output
 
-Always use `--output json` when parsing CLI output programmatically. This ensures raw JSON instead of human-formatted text.
-
 ```bash
 mk status --output json
-mk list --output json
 mk query "x" --output json
+mk doctor --output json
 ```
 
 ### Use `--dry-run` before mutating operations
 
-Mutating commands: `add`, `remove`. Use `--dry-run` to validate without side effects.
+Mutating commands: `add`, `remove`.
 
 ```bash
-mk add --json '{"path":"./new-dir"}' --dry-run
-mk remove --json '{"dir":"./memory-pack"}' --dry-run
+mk -j '{"command":"add","path":"./new-dir"}' --dry-run
+mk remove ./memory-pack --dry-run --yes
 ```
 
 ### Schema introspection
 
-Use `mk schema <command>` to get the input schema for any command at runtime.
-
 ```bash
 mk schema
 mk schema query
-mk schema add
+mk schema --format json-schema query
+mk schema use
+mk schema doctor
 ```
+
+Machine-readable JSON Schema for agent inputs: `mk schema --format json-schema <command>`. See [docs/llm-configuration.md](docs/llm-configuration.md) for model precedence.
 
 ## Input Hardening
 
@@ -59,17 +61,18 @@ The CLI validates all inputs. Rejected patterns:
 
 Assume inputs are validated; do not rely on the CLI to accept adversarial strings.
 
-## Key Commands and JSON Shapes
+## Key commands (JSON `command` values)
 
-| Command | Required | Optional |
-|---------|----------|----------|
-| add | `path` | `pack` |
-| remove | — | `dir` |
-| status | — | `dir` |
-| query | `query` | `mode`, `top_k`, `raw`, `pack` |
-| publish | — | `path`, `destination` |
-| use | — | `pack` |
-| models | — | — |
+| command   | Required    | Optional |
+|-----------|-------------|----------|
+| add       | `path` or `documents` / `conversation` | `pack` |
+| remove    | —           | `dir`, `confirm` |
+| status    | —           | `dir` (omit = all packs) |
+| query     | `query`     | `top_k`, `use_reranker`, `raw`, `pack` |
+| publish   | —           | `pack` / `path`, `destination` |
+| use       | —           | `pack`, `model` (see above) |
+| models    | —           | — |
+| doctor    | —           | — |
 
 ## Environment
 
@@ -80,4 +83,6 @@ Assume inputs are validated; do not rely on the CLI to accept adversarial string
 ## Local config
 
 - Config file path: `~/.config/memkit/memkit.json` (or `$XDG_CONFIG_HOME/memkit/memkit.json`)
-- Current supported field: `model` (optional default model id)
+- Supported field: `model` (optional default model id; use `mk use model <id>`)
+
+Precedence for **OpenAI query synthesis** is documented in [docs/llm-configuration.md](docs/llm-configuration.md) (`MEMKIT_OPENAI_MODEL` → `memkit.json` `openai:*` → default).

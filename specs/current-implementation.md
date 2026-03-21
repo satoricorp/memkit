@@ -23,7 +23,7 @@ This file is the authoritative current-state reference for runtime behavior.
 - `mk add`
 - `mk remove`
 - `mk status`
-- `mk list`
+- `mk status` (no `dir` lists packs; replaces former `mk list`)
 - `mk query`
 - `mk publish`
 - `mk use`

@@ -1,5 +1,7 @@
 # WWW boilerplate
 
+> **Repo note:** This `www/` Next.js app is a separate marketing/demo surface from the Rust `mk` CLI in the repo root. It is not required to build or run memkit; develop it independently.
+
 Config-first product website with auth, dashboard, checkout, and JSON-driven content.
 
 ## What to edit

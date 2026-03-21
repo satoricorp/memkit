@@ -16,7 +16,7 @@ The CLI binary is `mk` (at `target/release/mk`).
 # Build
 cargo build --release
 
-# Start server (FalkorDB sidecar + API)
+# Start server in background (builds release binary if missing)
 ./scripts/local-start.sh
 
 # Or run server directly (single or multiple packs, comma-delimited)
@@ -24,27 +24,30 @@ mk serve --pack ./memory-pack
 mk serve --pack ./pack1,./pack2
 
 # CLI commands (require server to be running)
-mk list
+mk status
 mk status ~/memory
 mk add ~/Documents/project-notes
 mk query "local memory pack"
+mk doctor
 ```
 
 ## Commands
 
 - `mk add <path-or-url> [--pack <name-or-path>]` — Add local files or URL/docs to a pack.
 - `mk remove [dir]` — Remove a pack (prompts unless `--yes`).
-- `mk status [dir]` — With `dir`: show status for that pack. Without `dir`: show `mk list`.
-- `mk list` — List registered packs with source and indexing status.
+- `mk status [dir]` — Without `dir`: list all registered packs. With `dir`: status for that pack.
 - `mk query "<text>" [--pack <name-or-path>] [--top-k N] [--no-rerank] [--raw]` — Query a pack.
 - `mk publish [--pack <name-or-path>] [--destination s3://bucket/prefix]` — Publish pack artifacts.
-- `mk use [name-or-path|model-name]` — Set default pack or default model.
+- `mk use` — Show default pack and default model.
+- `mk use pack [name-or-path]` — Show or set default pack.
+- `mk use model [model-id]` — Show or set default model (see `mk models`).
 - `mk models` — Show current model and supported model IDs.
+- `mk doctor` — Config path and whether the API is reachable (`GET /health`).
 - `mk serve [--pack <path>] [--host] [--port] [--foreground]` — Start server (background by default).
 - `mk stop [--port]` — Stop background server on the configured port.
-- `mk schema [command]` — Introspect input schema for commands (agent-friendly).
+- `mk schema [--format json|json-schema] [command]` — Introspect memkit or JSON Schema for agent inputs.
 
-Agent-friendly flags: `--json` (input), `--output json`, `--dry-run`. See [CONTEXT.md](CONTEXT.md).
+**Agents:** use a single JSON object with `mk -j '{...}'` or `mk --json` (see [CONTEXT.md](CONTEXT.md)). Global flags: `--output json`, `--dry-run`.
 
 ## Storage backend
 
@@ -62,29 +65,34 @@ cargo build --release
 
 - `~/.config/memkit/memkit.json` (or `$XDG_CONFIG_HOME/memkit/memkit.json`)
 
-Current fields:
+Fields:
 
-- `model` (optional) — Default model ID used by `mk use <model-name>`.
+- `model` (optional) — Default model ID for `mk use model <id>` (namespaced, e.g. `openai:gpt-5.2`). When it starts with `openai:`, the server may use it for query synthesis (see precedence below).
 
-Precedence: `MEMKIT_LLM_MODEL` environment variable overrides `memkit.json` model selection.
+**Query synthesis (OpenAI)** — order of precedence for which model the API calls:
+
+1. `MEMKIT_OPENAI_MODEL` (raw OpenAI model id, e.g. `gpt-5.2`)
+2. `memkit.json` `model` if it is an `openai:*` id
+3. Built-in default `gpt-5.2`
+
+Full detail: [docs/llm-configuration.md](docs/llm-configuration.md).
 
 ## Environment
 
-- `FALKORDB_SOCKET` (default `/tmp/falkordb.sock`)
-- `FALKOR_GRAPH` (default `memkit`)
-- `API_PORT` (default `4242`)
+- `API_HOST` / `API_PORT` (defaults `127.0.0.1` / `4242`)
 - `MEMKIT_PACK_PATH` (default `./memory-pack` when using serve)
 - `MEMKIT_PACK_PATHS` — Comma-delimited pack paths for multi-pack mode (overrides `MEMKIT_PACK_PATH` when set)
-- `MEMKIT_LLM_PROVIDER` (`llama` default; `rules` or `candle` optional)
-- `MEMKIT_LLM_MODEL` (GGUF model path for ontology extraction and query synthesis)
+- `MEMKIT_HELIX_ROOT` — Helix pack DB base directory (default `~/.memkit/helix`)
+- `OPENAI_API_KEY` — Required for query synthesis (OpenAI path; no local GGUF fallback in default builds)
+- `MEMKIT_OPENAI_MODEL` — Optional override for OpenAI chat model (see precedence above)
+- `MEMKIT_LLM_PROVIDER` — Ontology / extraction backend: `rules` (default), or `llama` when built with `--features llama-embedded`
+- `MEMKIT_LLM_MODEL` — Optional GGUF path for local embed / llama feature builds (not used for OpenAI synthesis)
 - `MEMKIT_LLM_MAX_TOKENS` (default `512`)
 - `MEMKIT_LLM_TIMEOUT_MS` (default `20000`)
 - `GOOGLE_APPLICATION_CREDENTIALS` — Path to service account JSON key (optional, for Google Docs/Sheets)
 - `MEMKIT_GOOGLE_SERVICE_ACCOUNT_JSON` — Inline service account JSON (optional; overrides path)
 
-`MEMKIT_ONTOLOGY_*` env vars are deprecated aliases; use `MEMKIT_LLM_*` instead.
-
-For query synthesis, run `./scripts/model-fetch.sh` once to download a GGUF model, or set `MEMKIT_LLM_MODEL` to your own path.
+`MEMKIT_ONTOLOGY_*` env vars are deprecated aliases; use `MEMKIT_LLM_*` where applicable.
 
 **Google Docs and Sheets (optional):** To index Google Docs or Sheets, configure a service account and share each doc/sheet with the service account email (no user OAuth). Set one of:
 
@@ -95,11 +103,20 @@ The service account email is fixed (e.g. `name@project-id.iam.gserviceaccount.co
 
 ## Docker
 
+Helix-only image: build the binary on the host, then copy it into a small Debian image.
+
 ```bash
 cargo build --release
 docker build -f docker/Dockerfile -t memkit .
-docker run -p 4242:4242 -v memkit-data:/data -e AUTH_SECRET=dev-secret memkit
+docker run --rm -p 4242:4242 \
+  -v "$PWD/memory-pack:/data/pack" \
+  -e MEMKIT_HELIX_ROOT=/data/helix \
+  -e MEMKIT_PACK_PATH=/data/pack \
+  -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+  memkit
 ```
+
+For local iteration, `./scripts/local-start.sh` is usually simpler than Docker.
 
 ## API
 
