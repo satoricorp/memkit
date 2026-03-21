@@ -8,7 +8,7 @@ name = "mk"
 path = "src/main.rs"
 
 [features]
-default = ["store-helix-only", "llama-embedded"]
+default = ["store-helix-only"]
 llama-embedded = ["dep:llama-cpp-2", "dep:encoding_rs"]
 # Helix backend (vector + graph, one LMDB per pack)
 helix = ["dep:helix-db", "dep:bumpalo", "dep:heed3"]

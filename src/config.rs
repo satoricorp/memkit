@@ -80,6 +80,7 @@ pub fn supported_models() -> Vec<(&'static str, &'static str)> {
         ("embed:qwen2.5-2b-instruct", "Qwen 2.5 2B Instruct (local GGUF)"),
         ("embed:tinyllama-1.1b-chat", "TinyLlama 1.1B Chat (local GGUF)"),
         // openai
+        ("openai:gpt-5.2", "OpenAI GPT-5.2"),
         ("openai:gpt-4o-mini", "OpenAI GPT-4o mini"),
         ("openai:gpt-4o", "OpenAI GPT-4o"),
         ("openai:gpt-4", "OpenAI GPT-4"),
@@ -98,3 +99,31 @@ pub fn is_supported_model(id: &str) -> bool {
     supported_models().iter().any(|(mid, _)| *mid == id)
 }
 
+/// Default OpenAI chat model for query synthesis (raw API id for `chat/completions`).
+pub const DEFAULT_OPENAI_SYNTHESIS_MODEL: &str = "gpt-5.2";
+
+/// Strip `openai:` namespace from memkit.json model ids for the OpenAI HTTP API.
+pub fn openai_api_model_id(namespaced_or_plain: &str) -> String {
+    namespaced_or_plain
+        .strip_prefix("openai:")
+        .unwrap_or(namespaced_or_plain)
+        .to_string()
+}
+
+/// Model id for query synthesis: `MEMKIT_OPENAI_MODEL`, else `openai:*` from memkit.json, else default.
+pub fn resolve_openai_synthesis_model() -> String {
+    if let Ok(m) = std::env::var("MEMKIT_OPENAI_MODEL") {
+        let t = m.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    if let Ok(cfg) = load_config() {
+        if let Some(ref id) = cfg.model {
+            if id.starts_with("openai:") {
+                return openai_api_model_id(id);
+            }
+        }
+    }
+    DEFAULT_OPENAI_SYNTHESIS_MODEL.to_string()
+}

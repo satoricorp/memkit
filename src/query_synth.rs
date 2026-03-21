@@ -1,80 +1,70 @@
 use anyhow::{Context, Result};
 
-use crate::ontology::LlmConfig;
-use crate::ontology_llama::generate_completion;
+use crate::config::resolve_openai_synthesis_model;
 use crate::types::QueryResponse;
 
 const MAX_CONTEXT_CHARS: usize = 8000;
 const MAX_CHUNKS: usize = 8;
-const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryProvider {
-    Llama,
+    /// No LLM call (e.g. empty retrieval).
+    None,
     OpenAI(String),
 }
 
 impl QueryProvider {
     pub fn label(&self) -> String {
         match self {
-            QueryProvider::Llama => "Internal: Llama".to_string(),
+            QueryProvider::None => "none".to_string(),
             QueryProvider::OpenAI(model) => format!("OpenAI: {}", model),
         }
     }
 }
 
-pub fn synthesize_answer(query: &str, response: &QueryResponse) -> Result<(String, QueryProvider)> {
+fn synthesis_max_tokens() -> usize {
+    std::env::var("MEMKIT_LLM_MAX_TOKENS")
+        .or_else(|_| std::env::var("MEMKIT_ONTOLOGY_MAX_TOKENS"))
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(512)
+}
+
+pub async fn synthesize_answer_async(
+    query: &str,
+    response: &QueryResponse,
+) -> Result<(String, QueryProvider)> {
     if response.results.is_empty() {
         return Ok((
             "No relevant context found in the memory pack.".to_string(),
-            QueryProvider::Llama,
+            QueryProvider::None,
         ));
     }
 
-    let prompt_inner = build_prompt_inner(query, response);
-    let config = LlmConfig::from_env();
-
-    // Prefer OpenAI when OPENAI_API_KEY is set; fall back to embedded model on failure or when no key.
-    if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-        if !api_key.trim().is_empty() {
-            let model = std::env::var("MEMKIT_OPENAI_MODEL")
-                .unwrap_or_else(|_| DEFAULT_OPENAI_MODEL.to_string());
-            match openai_completion(&prompt_inner, config.max_tokens, &model, &api_key) {
-                Ok(out) => {
-                    let answer = if std::env::var("MEMKIT_QUERY_RAW_ANSWER").as_deref() == Ok("1") {
-                        out.trim().to_string()
-                    } else {
-                        truncate_answer(&out)
-                    };
-                    return Ok((answer, QueryProvider::OpenAI(model)));
-                }
-                Err(_) => {}
-            }
-        }
-    }
-
-    if !std::path::Path::new(&config.model).exists() {
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .map_err(|_| anyhow::anyhow!(
+            "OPENAI_API_KEY is not set. Query synthesis uses OpenAI only; set OPENAI_API_KEY (optional: MEMKIT_OPENAI_MODEL or memkit.json with openai:*)."
+        ))?;
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
         anyhow::bail!(
-            "Model file not found: {}. Set MEMKIT_LLM_MODEL to a GGUF path, or build with `cargo build --features llama-embedded` for in-process inference.",
-            config.model
+            "OPENAI_API_KEY is empty. Query synthesis uses OpenAI only; set OPENAI_API_KEY."
         );
     }
 
-    let prompt = build_prompt_llama(&prompt_inner);
-    let out = match generate_completion(&prompt, &config, None) {
-        Ok(o) => o,
-        Err(e) => {
-            return Err(e.context(format!("Llama failed (model: {})", config.model)));
-        }
-    };
+    let model = resolve_openai_synthesis_model();
+    let prompt_inner = build_prompt_inner(query, response);
+    let max_tokens = synthesis_max_tokens();
+    let out = openai_completion_async(&prompt_inner, max_tokens, &model, api_key)
+        .await
+        .with_context(|| format!("OpenAI synthesis failed (model: {})", model))?;
 
-    // Set MEMKIT_QUERY_RAW_ANSWER=1 to see the unmodified model output (no cut_at_next_turn, strip_template_tokens, or first-line normalization).
     let answer = if std::env::var("MEMKIT_QUERY_RAW_ANSWER").as_deref() == Ok("1") {
         out.trim().to_string()
     } else {
         truncate_answer(&out)
     };
-    Ok((answer, QueryProvider::Llama))
+    Ok((answer, QueryProvider::OpenAI(model)))
 }
 
 fn build_prompt_inner(query: &str, response: &QueryResponse) -> String {
@@ -95,17 +85,14 @@ fn build_prompt_inner(query: &str, response: &QueryResponse) -> String {
     )
 }
 
-fn build_prompt_llama(prompt_inner: &str) -> String {
-    format!("<|user|>\n{prompt_inner}\n<|assistant|>\n")
-}
-
-fn openai_completion(
+async fn openai_completion_async(
     user_message: &str,
     max_tokens: usize,
     model: &str,
     api_key: &str,
 ) -> Result<String> {
-    let client = reqwest::blocking::Client::builder()
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
         .build()
         .context("build reqwest client for OpenAI")?;
     let body = serde_json::json!({
@@ -119,9 +106,10 @@ fn openai_completion(
         .header("Content-Type", "application/json")
         .body(body.to_string())
         .send()
+        .await
         .context("OpenAI API request failed")?;
     let status = res.status();
-    let text = res.text().context("read OpenAI response body")?;
+    let text = res.text().await.context("read OpenAI response body")?;
     if !status.is_success() {
         anyhow::bail!("OpenAI API error ({}): {}", status, text);
     }
@@ -140,7 +128,6 @@ fn openai_completion(
 /// Strip chat-template tokens that sometimes appear in model output (e.g. |<|user|>|, <|//3//>|).
 fn strip_template_tokens(s: &str) -> String {
     let mut out = s.to_string();
-    // Remove |<|...|>| style (e.g. |<|user|>|, |<|//3//>|)
     while let Some(start) = out.find("|<|") {
         let rest = &out[start..];
         let end = rest.find("|>|").map(|i| start + i + 3).or_else(|| rest.find(">|").map(|i| start + i + 2));
@@ -150,7 +137,6 @@ fn strip_template_tokens(s: &str) -> String {
             break;
         }
     }
-    // Remove <|...|> or <|...>|
     while let Some(start) = out.find("<|") {
         let rest = &out[start..];
         let end = rest.find("|>").map(|i| start + i + 2).or_else(|| rest.find(">|").map(|i| start + i + 2));
@@ -164,7 +150,6 @@ fn strip_template_tokens(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ").trim().to_string()
 }
 
-/// Cut at first "next turn" marker so we don't return model continuation (e.g. "|Human: ..." / "|ASSISTANT: ...").
 fn cut_at_next_turn(s: &str) -> &str {
     const MARKERS: &[&str] = &[
         "|Human:",
@@ -186,14 +171,12 @@ fn cut_at_next_turn(s: &str) -> &str {
     s[..cut].trim_end()
 }
 
-/// Clean up model output (strip template tokens, cut at next-turn markers, optional first-line normalization). No length limit.
 fn truncate_answer(s: &str) -> String {
     let after_turn = cut_at_next_turn(s);
     let mut trimmed = strip_template_tokens(after_turn).trim().to_string();
     if trimmed.is_empty() {
         trimmed = after_turn.trim().to_string();
     }
-    // If model returned a single-line numbered list like "1. answer", use just the answer part
     if let Some(first) = trimmed.lines().next() {
         let first = first.trim();
         if let Some(rest) = first.strip_prefix(|c: char| c.is_ascii_digit()) {
