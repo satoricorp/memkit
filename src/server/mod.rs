@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::response::Html;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -32,8 +32,11 @@ use crate::publish::{publish_pack_to_s3, PublishDestination};
 use crate::memkit_txt::ensure_memkit_txt;
 use crate::registry::{pack_dir_for_path, ensure_registered, load_registry, remove_pack_by_path, resolve_pack_by_name_or_path};
 use crate::query::{run_query, run_query_multi};
-use crate::query_synth::{synthesize_answer, QueryProvider};
+use crate::query_synth::{synthesize_answer_async, QueryProvider};
 use crate::types::SourceDoc;
+
+mod jobs;
+use jobs::{JobRecord, JobRegistry, JobState, JobType};
 
 fn load_pack_docs(pack: &Path, dim: usize) -> anyhow::Result<Vec<SourceDoc>> {
     helix_load_all_docs(&helix_pack_path_for_local(pack), dim)
@@ -52,80 +55,6 @@ struct AppState {
     jobs: Arc<Mutex<JobRegistry>>,
     google: Option<Arc<GoogleAuthState>>,
     google_load_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum JobType {
-    IndexSources,
-    /// New pack: copy dir into sources, register, then run index. Job stays active for entire flow.
-    IndexNewPack,
-    AddDocuments,
-    RemovePack,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum JobState {
-    Queued,
-    Running,
-    Succeeded,
-    Failed,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct JobRecord {
-    id: String,
-    job_type: JobType,
-    state: JobState,
-    trigger: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pack_path: Option<String>,
-    /// (temp_path_to_remove, pack_path) for iCloud: remove source root and delete temp after index
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cleanup_after_index: Option<(String, String)>,
-    /// For AddDocuments: { "pack_path": string, "items": [ { "content": string, "source_path": string } ] }
-    #[serde(skip_serializing_if = "Option::is_none")]
-    add_payload: Option<Value>,
-    enqueued_at: DateTime<Utc>,
-    started_at: Option<DateTime<Utc>>,
-    finished_at: Option<DateTime<Utc>>,
-    result: Option<Value>,
-    error: Option<String>,
-}
-
-struct JobRegistry {
-    jobs: Vec<JobRecord>,
-    queue: std::collections::VecDeque<String>,
-    running: Option<String>,
-    next_id: u64,
-}
-
-impl JobRegistry {
-    fn new() -> Self {
-        Self {
-            jobs: Vec::new(),
-            queue: std::collections::VecDeque::new(),
-            running: None,
-            next_id: 1,
-        }
-    }
-
-    fn trim_history(&mut self, keep_last: usize) {
-        if self.jobs.len() <= keep_last {
-            return;
-        }
-        let drop_n = self.jobs.len() - keep_last;
-        self.jobs.drain(0..drop_n);
-    }
-
-    fn find_mut(&mut self, id: &str) -> Option<&mut JobRecord> {
-        self.jobs.iter_mut().find(|j| j.id == id)
-    }
-
-    fn find(&self, id: &str) -> Option<&JobRecord> {
-        self.jobs.iter().find(|j| j.id == id)
-    }
 }
 
 #[derive(Deserialize)]
@@ -532,9 +461,8 @@ async fn graph_view() -> Html<&'static str> {
 }
 
 /// Query flow: (1) Retrieval: run_query() loads pack docs, embeds the query, and runs vector search
-/// (Helix: helix_hybrid_query, or LanceDB+Falkor). Returns QueryResponse with results (top chunks).
-/// (2) Synthesis: unless req.raw, synthesize_answer() builds a prompt from top chunks and runs the LLM
-/// (Llama) to produce a short answer. Use ?raw=true or --raw to skip synthesis and get retrieval-only.
+/// (Helix: helix_hybrid_query). Returns QueryResponse with results (top chunks).
+/// (2) Synthesis: unless req.raw, synthesize_answer_async calls OpenAI chat/completions. Use ?raw=true or --raw to skip synthesis.
 async fn query(
     State(state): State<AppState>,
     Json(req): Json<QueryRequest>,
@@ -609,11 +537,11 @@ async fn query(
             if req.raw {
                 Ok(Json(json!(resp)))
             } else {
-                match synthesize_answer(&req.query, &resp) {
+                match synthesize_answer_async(&req.query, &resp).await {
                     Ok((answer, provider)) => {
                         let model = match &provider {
                             QueryProvider::OpenAI(m) => m.clone(),
-                            QueryProvider::Llama => "qwen-2.5".to_string(),
+                            QueryProvider::None => String::new(),
                         };
                         Ok(Json(json!({
                             "answer": answer,
