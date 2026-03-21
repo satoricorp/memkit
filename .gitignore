@@ -10,3 +10,5 @@
 /.local-run
 /.local-data
 .env
+.cursor
+.local-runtime
