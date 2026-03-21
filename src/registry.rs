@@ -242,3 +242,13 @@ pub fn resolve_pack_by_name_or_path(arg: &str) -> Result<PathBuf> {
     }
     Err(anyhow::anyhow!("no memory pack at {}", path.display()))
 }
+
+/// Pack paths used when starting `mk serve` without `--pack` (all registered packs).
+pub fn default_serve_pack_paths() -> Result<Vec<PathBuf>> {
+    let _ = ensure_default_if_unset();
+    let reg = load_registry().unwrap_or_default();
+    if reg.packs.is_empty() {
+        anyhow::bail!("no packs registered. Add a pack first (e.g. mk add <path>) or run with --pack <path>");
+    }
+    Ok(reg.packs.iter().map(|p| PathBuf::from(&p.path)).collect())
+}

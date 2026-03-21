@@ -63,7 +63,7 @@ pub fn save_config(cfg: &MemkitConfig) -> Result<()> {
 pub fn set_model(model_id: &str) -> Result<()> {
     if !is_supported_model(model_id) {
         anyhow::bail!(
-            "unknown model '{}'. run `mk models` to see supported models.",
+            "unknown model '{}'. run `mk list` to see supported models.",
             model_id
         );
     }
@@ -73,7 +73,7 @@ pub fn set_model(model_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Supported model ids (namespaced). Publish this list; used for validation and for `mk models` output.
+/// Supported model ids (namespaced). Publish this list; used for validation and for `mk list` output.
 pub fn supported_models() -> Vec<(&'static str, &'static str)> {
     vec![
         // embed: local GGUF (download if missing)

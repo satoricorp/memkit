@@ -403,7 +403,28 @@ fn cli_command_from_json(cmd: &str, j: &serde_json::Value) -> Result<CliCommand>
                 format,
             })
         }
+        "serve" => {
+            let pack = get_str("pack");
+            let host = get_str("host");
+            let port = get_u64("port")
+                .map(|p| u16::try_from(p).map_err(|_| anyhow!("invalid port value")))
+                .transpose()?;
+            let foreground = get_bool("foreground").unwrap_or(false);
+            Ok(CliCommand::Serve {
+                pack,
+                host,
+                port,
+                foreground,
+            })
+        }
+        "stop" => {
+            let port = get_u64("port")
+                .map(|p| u16::try_from(p).map_err(|_| anyhow!("invalid port value")))
+                .transpose()?;
+            Ok(CliCommand::Stop { port })
+        }
         "use" => cli_use_from_json(j),
+        "list" => Ok(CliCommand::List),
         "models" => Ok(CliCommand::Models),
         "doctor" => Ok(CliCommand::Doctor),
         "version" => Ok(CliCommand::Version),
@@ -556,40 +577,26 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
         }
         "use" => {
             let rest = &args[1..];
-            if rest.is_empty() {
-                return Ok(CliCommand::Use(UseSpec {
-                    pack: UseField::Show,
-                    model: UseField::Show,
-                }));
+            if rest.len() != 2 {
+                return Err(anyhow!(
+                    "usage: mk use pack <name-or-path> | mk use model <model-id> — run `mk list` for current defaults"
+                ));
             }
             match rest[0].as_str() {
-                "pack" => match rest.len() {
-                    1 => Ok(CliCommand::Use(UseSpec {
-                        pack: UseField::Show,
-                        model: UseField::Absent,
-                    })),
-                    2 => Ok(CliCommand::Use(UseSpec {
-                        pack: UseField::Set(rest[1].clone()),
-                        model: UseField::Absent,
-                    })),
-                    _ => Err(anyhow!("usage: mk use pack [name-or-path]")),
-                },
-                "model" => match rest.len() {
-                    1 => Ok(CliCommand::Use(UseSpec {
-                        pack: UseField::Absent,
-                        model: UseField::Show,
-                    })),
-                    2 => Ok(CliCommand::Use(UseSpec {
-                        pack: UseField::Absent,
-                        model: UseField::Set(rest[1].clone()),
-                    })),
-                    _ => Err(anyhow!("usage: mk use model [model-id]")),
-                },
+                "pack" => Ok(CliCommand::Use(UseSpec {
+                    pack: UseField::Set(rest[1].clone()),
+                    model: UseField::Absent,
+                })),
+                "model" => Ok(CliCommand::Use(UseSpec {
+                    pack: UseField::Absent,
+                    model: UseField::Set(rest[1].clone()),
+                })),
                 _ => Err(anyhow!(
-                    "usage: mk use [pack|model] … — try `mk use pack <path>`, `mk use model <id>`, or `mk use` to show both"
+                    "usage: mk use pack <name-or-path> | mk use model <model-id> — run `mk list` for current defaults"
                 )),
             }
         }
+        "list" => Ok(CliCommand::List),
         "models" => Ok(CliCommand::Models),
         "doctor" => Ok(CliCommand::Doctor),
         "serve" => {
@@ -651,7 +658,7 @@ fn run_use(spec: &UseSpec) -> Result<()> {
         UseField::Set(id) => {
             if !config::is_supported_model(id) {
                 anyhow::bail!(
-                    "unknown model '{}'. run `mk models` to see supported models.",
+                    "unknown model '{}'. run `mk list` to see supported models.",
                     id
                 );
             }
@@ -680,6 +687,67 @@ fn run_use(spec: &UseSpec) -> Result<()> {
         UseField::Absent => {}
     }
     Ok(())
+}
+
+fn models_json_value() -> serde_json::Value {
+    let cfg = config::load_config().unwrap_or_default();
+    let supported = config::supported_models();
+    serde_json::json!({
+        "current": cfg.model,
+        "supported": supported.iter().map(|(id, desc)| serde_json::json!({"id": id, "description": desc})).collect::<Vec<_>>()
+    })
+}
+
+fn print_models_section() {
+    let cfg = config::load_config().unwrap_or_default();
+    let supported = config::supported_models();
+    let c = crate::term::color_stdout();
+    if c {
+        println!("{}", crate::term::section_title(c, "Models"));
+        println!();
+        if let Some(ref m) = cfg.model {
+            println!(
+                "  {} {}",
+                crate::term::bold_word(c, "Current:"),
+                m
+            );
+        } else {
+            println!(
+                "  {} {}",
+                crate::term::bold_word(c, "Current:"),
+                crate::term::dimmed_word(c, "(none set)")
+            );
+        }
+        println!();
+        println!("  {}", crate::term::bold_word(c, "Supported:"));
+        for (id, desc) in &supported {
+            println!(
+                "    {}  {}",
+                crate::term::data_num(c, id),
+                crate::term::dimmed_word(c, desc)
+            );
+        }
+        println!();
+        println!(
+            "  {}",
+            crate::term::dimmed_word(
+                c,
+                "Run 'mk use model <id>' to set a default model."
+            )
+        );
+    } else {
+        if let Some(ref m) = cfg.model {
+            println!("Current: {}", m);
+        } else {
+            println!("Current: (none set)");
+        }
+        println!("Supported:");
+        for (id, desc) in &supported {
+            println!("  {}  {}", id, desc);
+        }
+        println!();
+        println!("Run 'mk use model <id>' to set a default model.");
+    }
 }
 
 /// `tail` includes any leading spaces after the subcommand (e.g. ` " <args>…"` or ` "   (note)"`).
@@ -730,10 +798,14 @@ fn print_help() {
         "publish",
         " [--pack <name-or-path>] [--destination s3://bucket/prefix]",
     );
-    print_help_cmd_line(c, "use", "   (show default pack and model)");
-    print_help_cmd_line(c, "use pack", " [name-or-path]   (show or set default pack)");
-    print_help_cmd_line(c, "use model", " [model-id]   (show or set default model)");
-    print_help_cmd_line(c, "models", "   (list supported model IDs)");
+    print_help_cmd_line(
+        c,
+        "list",
+        "   (registered packs and current/supported models)",
+    );
+    print_help_cmd_line(c, "models", "   (supported model IDs and current default)");
+    print_help_cmd_line(c, "use pack", " <name-or-path>   (set default pack)");
+    print_help_cmd_line(c, "use model", " <model-id>   (set default model)");
     print_help_cmd_line(c, "doctor", "   (config path + server /health reachability)");
     print_help_cmd_line(c, "serve", " [--pack <path>] [--host H] [--port P] [--foreground]");
     print_help_cmd_line(c, "stop", " [--port P]");
@@ -874,7 +946,8 @@ async fn run() -> Result<()> {
                 cmd.stdout(std::process::Stdio::null());
                 cmd.stderr(std::process::Stdio::null());
                 cmd.spawn().map_err(|e| anyhow!("failed to start server process: {}", e))?;
-                std::thread::sleep(std::time::Duration::from_secs(2));
+                let cfg = ServerConfig::for_cli_serve(host.clone(), port);
+                cli_client::wait_for_server_ready(&cfg).await?;
                 println!(
                     "{}",
                     crate::term::style_stdout(
@@ -887,12 +960,7 @@ async fn run() -> Result<()> {
             let packs: Vec<PathBuf> = if let Some(ref p) = pack {
                 vec![resolve_pack_by_name_or_path(p)?]
             } else {
-                let _ = crate::registry::ensure_default_if_unset();
-                let reg = load_registry().unwrap_or_default();
-                if reg.packs.is_empty() {
-                    anyhow::bail!("no packs registered. Add a pack first (e.g. mk add <path>) or run with --pack <path>");
-                }
-                reg.packs.iter().map(|p| PathBuf::from(&p.path)).collect()
+                crate::registry::default_serve_pack_paths()?
             };
             let host = host.unwrap_or_else(|| "127.0.0.1".to_string());
             let port = port.unwrap_or(4242);
@@ -968,66 +1036,6 @@ async fn run() -> Result<()> {
                     run_use(&spec)?;
                     return Ok(());
                 }
-                CliCommand::Models => {
-                    let cfg = config::load_config().unwrap_or_default();
-                    let supported = config::supported_models();
-                    if ctx.output_format == OutputFormat::Json {
-                        let out = serde_json::json!({
-                            "current": cfg.model,
-                            "supported": supported.iter().map(|(id, desc)| serde_json::json!({"id": id, "description": desc})).collect::<Vec<_>>()
-                        });
-                        println!("{}", serde_json::to_string_pretty(&out)?);
-                    } else {
-                        let c = crate::term::color_stdout();
-                        if c {
-                            println!("{}", crate::term::section_title(c, "Models"));
-                            println!();
-                            if let Some(ref m) = cfg.model {
-                                println!(
-                                    "  {} {}",
-                                    crate::term::bold_word(c, "Current:"),
-                                    m
-                                );
-                            } else {
-                                println!(
-                                    "  {} {}",
-                                    crate::term::bold_word(c, "Current:"),
-                                    crate::term::dimmed_word(c, "(none set)")
-                                );
-                            }
-                            println!();
-                            println!("  {}", crate::term::bold_word(c, "Supported:"));
-                            for (id, desc) in &supported {
-                                println!(
-                                    "    {}  {}",
-                                    crate::term::data_num(c, id),
-                                    crate::term::dimmed_word(c, desc)
-                                );
-                            }
-                            println!();
-                            println!(
-                                "  {}",
-                                crate::term::dimmed_word(
-                                    c,
-                                    "Run 'mk use model <id>' to set a default model."
-                                )
-                            );
-                        } else {
-                            if let Some(ref m) = cfg.model {
-                                println!("Current: {}", m);
-                            } else {
-                                println!("Current: (none set)");
-                            }
-                            println!("Supported:");
-                            for (id, desc) in &supported {
-                                println!("  {}  {}", id, desc);
-                            }
-                            println!();
-                            println!("Run 'mk use model <id>' to set a default model.");
-                        }
-                    }
-                    return Ok(());
-                }
                 _ => {}
             }
 
@@ -1042,8 +1050,13 @@ async fn run() -> Result<()> {
                     | CliCommand::Serve { .. }
                     | CliCommand::Stop { .. }
             );
+            if matches!(&cmd, CliCommand::Doctor) {
+                cli_client::print_server_note_doctor(&cfg, ctx.output_format == OutputFormat::Json)
+                    .await;
+            }
             if commands_need_server {
-                cli_client::require_server(&cfg).await?;
+                cli_client::ensure_server(&cfg).await?;
+                cli_client::print_server_note_running(&cfg, ctx.output_format == OutputFormat::Json);
             }
 
             enum CommandOut {
@@ -1168,6 +1181,28 @@ async fn run() -> Result<()> {
                         }
                         Ok(CommandOut::Done)
                     }
+                }
+                CliCommand::List => {
+                    let output_json = ctx.output_format == OutputFormat::Json;
+                    let pack_data = cli_client::list(&cfg, output_json).await?;
+                    if output_json {
+                        let merged = serde_json::json!({
+                            "packs": pack_data,
+                            "models": models_json_value(),
+                        });
+                        println!("{}", serde_json::to_string_pretty(&merged)?);
+                    } else {
+                        print_models_section();
+                    }
+                    Ok(CommandOut::Done)
+                }
+                CliCommand::Models => {
+                    if ctx.output_format == OutputFormat::Json {
+                        println!("{}", serde_json::to_string_pretty(&models_json_value())?);
+                    } else {
+                        print_models_section();
+                    }
+                    Ok(CommandOut::Done)
                 }
                 CliCommand::Doctor => {
                     let data = cli_client::doctor(&cfg).await?;
@@ -1298,7 +1333,6 @@ async fn run() -> Result<()> {
                 | CliCommand::Version
                 | CliCommand::Schema { .. }
                 | CliCommand::Use(_)
-                | CliCommand::Models
                 | CliCommand::Serve { .. }
                 | CliCommand::Stop { .. } => unreachable!(),
             };

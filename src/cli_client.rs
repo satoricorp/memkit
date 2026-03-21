@@ -22,7 +22,18 @@ impl ServerConfig {
         Self { host, port }
     }
 
-    fn base_url(&self) -> String {
+    /// Same host/port resolution as `serve_with_startup` after CLI defaults (`API_PORT` overrides `port`).
+    pub fn for_cli_serve(host: Option<String>, port: Option<u16>) -> Self {
+        let host = host.unwrap_or_else(|| "127.0.0.1".to_string());
+        let port_cli = port.unwrap_or(4242);
+        let port = std::env::var("API_PORT")
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(port_cli);
+        Self { host, port }
+    }
+
+    pub fn base_url(&self) -> String {
         format!("http://{}:{}", self.host, self.port)
     }
 }
@@ -47,6 +58,8 @@ fn http_client() -> Result<reqwest::Client> {
 const REQ_TIMEOUT_DEFAULT: Duration = Duration::from_secs(120);
 const REQ_TIMEOUT_HEALTH: Duration = Duration::from_secs(5);
 const REQ_TIMEOUT_INDEX: Duration = Duration::from_secs(600);
+const ENSURE_SERVER_MAX_WAIT: Duration = Duration::from_secs(30);
+const ENSURE_SERVER_POLL: Duration = Duration::from_millis(250);
 
 pub async fn doctor(cfg: &ServerConfig) -> Result<Value> {
     let exe = std::env::current_exe().ok();
@@ -91,16 +104,76 @@ async fn server_is_up(cfg: &ServerConfig) -> bool {
     }
 }
 
-/// Ensure the server is running; return an error with instructions if not. Does not start the server.
-pub async fn require_server(cfg: &ServerConfig) -> Result<()> {
+/// Wait until `/health` succeeds or timeout (used after spawning a background server).
+pub async fn wait_for_server_ready(cfg: &ServerConfig) -> Result<()> {
+    let deadline = std::time::Instant::now() + ENSURE_SERVER_MAX_WAIT;
+    while std::time::Instant::now() < deadline {
+        if server_is_up(cfg).await {
+            return Ok(());
+        }
+        tokio::time::sleep(ENSURE_SERVER_POLL).await;
+    }
+    Err(anyhow!(
+        "memkit server did not become ready at {} within {}s (check port {} or run `mk serve --foreground` for logs)",
+        cfg.base_url(),
+        ENSURE_SERVER_MAX_WAIT.as_secs(),
+        cfg.port
+    ))
+}
+
+/// Start the server in the background if needed, then wait until `/health` is OK.
+pub async fn ensure_server(cfg: &ServerConfig) -> Result<()> {
     if server_is_up(cfg).await {
         return Ok(());
     }
-    Err(anyhow!(
-        "Server not running at {}:{}. Start it with 'mk serve' (or 'mk serve --pack <path>' to specify packs).",
-        cfg.host,
-        cfg.port
-    ))
+    let _ = crate::registry::default_serve_pack_paths()?;
+
+    let exe = std::env::current_exe().context("current exe")?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("serve")
+        .arg("--host")
+        .arg(&cfg.host)
+        .arg("--port")
+        .arg(cfg.port.to_string())
+        .env("MEMKIT_SERVE_FOREGROUND", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    cmd.spawn()
+        .context("failed to start memkit server in background")?;
+
+    wait_for_server_ready(cfg).await
+}
+
+/// One-line hint on stderr: server URL (after a successful `ensure_server`).
+pub fn print_server_note_running(cfg: &ServerConfig, output_json: bool) {
+    if output_json {
+        return;
+    }
+    let c = term::color_stderr();
+    eprintln!(
+        "{} {}",
+        term::dimmed_word(c, "Server:"),
+        term::data_num(c, cfg.base_url())
+    );
+}
+
+/// One-line hint on stderr for `mk doctor`: URL if up, else background `mk serve` command.
+pub async fn print_server_note_doctor(cfg: &ServerConfig, output_json: bool) {
+    if output_json {
+        return;
+    }
+    let c = term::color_stderr();
+    if server_is_up(cfg).await {
+        print_server_note_running(cfg, false);
+        return;
+    }
+    let hint = format!("mk serve --host {} --port {}", cfg.host, cfg.port);
+    eprintln!(
+        "{} {} {}",
+        term::dimmed_word(c, "Server:"),
+        term::dimmed_word(c, "not running — start with:"),
+        term::warn_words(c, &hint)
+    );
 }
 
 /// Poll /status until the index job is no longer active (or timeout). Use after POST /add (add directory).
@@ -491,7 +564,7 @@ pub async fn query(cfg: &ServerConfig, args: &QueryArgs, pack: Option<&str>) -> 
                 || msg.contains("failed to connect");
             return Err(if connection_error {
                 anyhow!(e).context(
-                    "Could not reach the memkit server. Is it running? Try 'mk serve' or run a command that starts it (e.g. mk query).",
+                    "Could not reach the memkit server. If it was stopped, run `mk query` or `mk serve` again.",
                 )
             } else {
                 anyhow!(e)

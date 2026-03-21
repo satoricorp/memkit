@@ -38,6 +38,10 @@ pub enum CliCommand {
     Status {
         dir: Option<String>,
     },
+    /// List registered packs (and per-pack status) plus current/supported models.
+    List,
+    /// Print supported model IDs and current default (local config; no server).
+    Models,
     Query {
         query: String,
         top_k: usize,
@@ -54,7 +58,6 @@ pub enum CliCommand {
         destination: Option<String>,
     },
     Use(UseSpec),
-    Models,
     Doctor,
     Serve {
         pack: Option<String>,
