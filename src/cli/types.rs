@@ -40,8 +40,6 @@ pub enum CliCommand {
     },
     /// List registered packs (and per-pack status) plus current/supported models.
     List,
-    /// Print supported model IDs and current default (local config; no server).
-    Models,
     Query {
         query: String,
         top_k: usize,

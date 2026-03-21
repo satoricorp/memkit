@@ -11,7 +11,6 @@ pub const SCHEMA_COMMANDS: &[&str] = &[
     "publish",
     "use",
     "list",
-    "models",
     "doctor",
     "schema",
     "serve",
@@ -96,14 +95,6 @@ fn examples_for_command(cmd: &str) -> serde_json::Value {
             ],
             "agent_json": [
                 "mk -j '{\"command\":\"list\"}'"
-            ]
-        }),
-        "models" => json!({
-            "argv": [
-                "mk models --output json"
-            ],
-            "agent_json": [
-                "mk -j '{\"command\":\"models\"}'"
             ]
         }),
         "doctor" => json!({
@@ -278,14 +269,6 @@ pub fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                 }
             }
         }),
-        "models" => serde_json::json!({
-            "command": "models",
-            "input": {},
-            "output": {
-                "current": "string | null",
-                "supported": [{"id": "string", "description": "string"}]
-            }
-        }),
         "doctor" => serde_json::json!({
             "command": "doctor",
             "input": {},
@@ -448,15 +431,6 @@ fn input_json_schema_for_command(cmd: &str) -> Option<serde_json::Value> {
             json!({
                 "$schema": schema_uri,
                 "title": "mk list (JSON input)",
-                "type": "object",
-                "properties": {}
-            }),
-            vec![json!({})],
-        ),
-        "models" => json_schema_attach_examples(
-            json!({
-                "$schema": schema_uri,
-                "title": "mk models (JSON input)",
                 "type": "object",
                 "properties": {}
             }),

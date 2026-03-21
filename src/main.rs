@@ -425,7 +425,6 @@ fn cli_command_from_json(cmd: &str, j: &serde_json::Value) -> Result<CliCommand>
         }
         "use" => cli_use_from_json(j),
         "list" => Ok(CliCommand::List),
-        "models" => Ok(CliCommand::Models),
         "doctor" => Ok(CliCommand::Doctor),
         "version" => Ok(CliCommand::Version),
         "help" | "--help" | "-h" => Ok(CliCommand::Help),
@@ -597,7 +596,6 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
             }
         }
         "list" => Ok(CliCommand::List),
-        "models" => Ok(CliCommand::Models),
         "doctor" => Ok(CliCommand::Doctor),
         "serve" => {
             let pack = flag_value(&args[1..], "--pack");
@@ -803,7 +801,6 @@ fn print_help() {
         "list",
         "   (registered packs and current/supported models)",
     );
-    print_help_cmd_line(c, "models", "   (supported model IDs and current default)");
     print_help_cmd_line(c, "use pack", " <name-or-path>   (set default pack)");
     print_help_cmd_line(c, "use model", " <model-id>   (set default model)");
     print_help_cmd_line(c, "doctor", "   (config path + server /health reachability)");
@@ -1045,7 +1042,6 @@ async fn run() -> Result<()> {
                     | CliCommand::Version
                     | CliCommand::Schema { .. }
                     | CliCommand::Use(_)
-                    | CliCommand::Models
                     | CliCommand::Doctor
                     | CliCommand::Serve { .. }
                     | CliCommand::Stop { .. }
@@ -1191,14 +1187,6 @@ async fn run() -> Result<()> {
                             "models": models_json_value(),
                         });
                         println!("{}", serde_json::to_string_pretty(&merged)?);
-                    } else {
-                        print_models_section();
-                    }
-                    Ok(CommandOut::Done)
-                }
-                CliCommand::Models => {
-                    if ctx.output_format == OutputFormat::Json {
-                        println!("{}", serde_json::to_string_pretty(&models_json_value())?);
                     } else {
                         print_models_section();
                     }
