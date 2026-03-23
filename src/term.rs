@@ -96,6 +96,34 @@ pub fn dimmed_word(color: bool, s: &str) -> String {
     }
 }
 
+/// Pack path in list/status (white when colors on).
+pub fn white_word(color: bool, s: &str) -> String {
+    if color {
+        s.white().to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Cyan parenthetical label e.g. `(default)` for pack list lines.
+pub fn cyan_label(color: bool, s: &str) -> String {
+    if color {
+        s.cyan().to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Bracketed detail for `mk doctor` lines, e.g. `[http://127.0.0.1:4242]` (cyan when color on).
+pub fn bracketed_cyan(color: bool, inner: &str) -> String {
+    let s = format!("[{}]", inner);
+    if color {
+        s.cyan().to_string()
+    } else {
+        s
+    }
+}
+
 /// Metrics, counts, host:port (cyan).
 pub fn data_num(color: bool, s: impl Display) -> String {
     let t = s.to_string();
