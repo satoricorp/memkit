@@ -665,6 +665,11 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
         }
         "use" => {
             let rest = &args[1..];
+            if rest.is_empty()
+                || (rest.len() == 1 && matches!(rest[0].as_str(), "--help" | "-h"))
+            {
+                return Ok(CliCommand::Help);
+            }
             if rest.len() != 2 {
                 return Err(anyhow!(
                     "usage: mk use pack <name-or-path> | mk use model <model-id> — run `mk list` for current defaults"
