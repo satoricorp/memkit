@@ -1,6 +1,7 @@
-//! `mk schema` — memkit JSON blobs and optional JSON Schema output for agent inputs.
+//! `mk schema` — memkit schema as YAML (and optional JSON Schema for agent inputs).
 
 use anyhow::{Result, anyhow};
+use owo_colors::OwoColorize;
 use serde_json::json;
 
 pub const SCHEMA_COMMANDS: &[&str] = &[
@@ -31,124 +32,86 @@ fn global_block() -> serde_json::Value {
     })
 }
 
-/// Per-command argv and `mk -j` examples (single source for top-level + per-command memkit).
+/// Shell argv lines first, then `mk -j` lines (one YAML list per command).
+fn example_list(argv: &[&str], agent_json: &[&str]) -> serde_json::Value {
+    let mut items = Vec::with_capacity(argv.len() + agent_json.len());
+    for &line in argv {
+        items.push(json!(line));
+    }
+    for &line in agent_json {
+        items.push(json!(line));
+    }
+    serde_json::Value::Array(items)
+}
+
+/// Per-command examples: argv-style then `mk -j` (single source for top-level + per-command memkit).
 fn examples_for_command(cmd: &str) -> serde_json::Value {
     match cmd {
-        "add" => json!({
-            "argv": [
+        "add" => example_list(
+            &[
                 "mk add ./path/to/source --pack ./memory-pack",
-                "mk add https://docs.google.com/document/d/abc123 --pack ./memory-pack"
+                "mk add https://docs.google.com/document/d/abc123 --pack ./memory-pack",
             ],
-            "agent_json": [
+            &[
                 "mk -j '{\"command\":\"add\",\"path\":\"./specs\",\"pack\":\"./memory-pack\"}'",
-                "mk -j '{\"command\":\"add\",\"documents\":[{\"type\":\"url\",\"value\":\"https://example.com\"}]}'"
-            ]
-        }),
-        "remove" => json!({
-            "argv": [
-                "mk remove ./memory-pack --yes",
-                "mk remove --yes"
+                "mk -j '{\"command\":\"add\",\"documents\":[{\"type\":\"url\",\"value\":\"https://example.com\"}]}'",
             ],
-            "agent_json": [
-                "mk -j '{\"command\":\"remove\",\"dir\":\"./memory-pack\",\"confirm\":true}'"
-            ]
-        }),
-        "status" => json!({
-            "argv": [
-                "mk status ./memory-pack",
-                "mk status"
-            ],
-            "agent_json": [
+        ),
+        "remove" => example_list(
+            &["mk remove ./memory-pack --yes", "mk remove --yes"],
+            &["mk -j '{\"command\":\"remove\",\"dir\":\"./memory-pack\",\"confirm\":true}'"],
+        ),
+        "status" => example_list(
+            &["mk status ./memory-pack", "mk status"],
+            &[
                 "mk -j '{\"command\":\"status\",\"dir\":\"./memory-pack\"}'",
-                "mk -j '{\"command\":\"status\"}'"
-            ]
-        }),
-        "query" => json!({
-            "argv": [
-                "mk query \"how does auth work\" --top-k 12 --no-rerank --pack mypack --raw --output json"
+                "mk -j '{\"command\":\"status\"}'",
             ],
-            "agent_json": [
-                "mk -j '{\"command\":\"query\",\"query\":\"how does auth work\",\"top_k\":8,\"use_reranker\":true,\"raw\":false,\"pack\":\"./memory-pack\"}'"
-            ]
-        }),
-        "publish" => json!({
-            "argv": [
-                "mk publish --pack ./memory-pack --destination s3://bucket/prefix"
-            ],
-            "agent_json": [
-                "mk -j '{\"command\":\"publish\",\"pack\":\"./memory-pack\",\"destination\":\"s3://bucket/prefix\"}'"
-            ]
-        }),
-        "use" => json!({
-            "argv": [
-                "mk use pack ./memory-pack",
-                "mk use model openai:gpt-4"
-            ],
-            "agent_json": [
+        ),
+        "query" => example_list(
+            &["mk query \"how does auth work\" --top-k 12 --no-rerank --pack mypack --raw --output json"],
+            &["mk -j '{\"command\":\"query\",\"query\":\"how does auth work\",\"top_k\":8,\"use_reranker\":true,\"raw\":false,\"pack\":\"./memory-pack\"}'"],
+        ),
+        "publish" => example_list(
+            &["mk publish --pack ./memory-pack --destination s3://bucket/prefix"],
+            &["mk -j '{\"command\":\"publish\",\"pack\":\"./memory-pack\",\"destination\":\"s3://bucket/prefix\"}'"],
+        ),
+        "use" => example_list(
+            &["mk use pack ./memory-pack", "mk use model openai:gpt-4"],
+            &[
                 "mk -j '{\"command\":\"use\",\"pack\":null,\"model\":null}'",
-                "mk -j '{\"command\":\"use\",\"model\":\"openai:gpt-4\"}'"
-            ]
-        }),
-        "list" => json!({
-            "argv": [
-                "mk list --output json"
+                "mk -j '{\"command\":\"use\",\"model\":\"openai:gpt-4\"}'",
             ],
-            "agent_json": [
-                "mk -j '{\"command\":\"list\"}'"
-            ]
-        }),
-        "doctor" => json!({
-            "argv": [
-                "mk doctor --output json"
-            ],
-            "agent_json": [
-                "mk -j '{\"command\":\"doctor\"}'"
-            ]
-        }),
-        "schema" => json!({
-            "argv": [
-                "mk schema --format json-schema query",
-                "mk schema query"
-            ],
-            "agent_json": [
-                "mk -j '{\"command\":\"schema\",\"format\":\"json-schema\",\"schema\":\"query\"}'"
-            ]
-        }),
-        "serve" => json!({
-            "argv": [
-                "mk serve --pack ./memory-pack --host 127.0.0.1 --port 4242 --foreground"
-            ],
-            "agent_json": [
-                "mk -j '{\"command\":\"serve\",\"pack\":\"./memory-pack\",\"host\":\"127.0.0.1\",\"port\":4242,\"foreground\":true}'"
-            ]
-        }),
-        "stop" => json!({
-            "argv": [
-                "mk stop --port 4242"
-            ],
-            "agent_json": [
-                "mk -j '{\"command\":\"stop\",\"port\":4242}'"
-            ]
-        }),
-        "help" => json!({
-            "argv": [
-                "mk help",
-                "mk --help"
-            ],
-            "agent_json": [
-                "mk -j '{\"command\":\"help\"}'"
-            ]
-        }),
-        "version" => json!({
-            "argv": [
-                "mk version",
-                "mk -V"
-            ],
-            "agent_json": [
-                "mk -j '{\"command\":\"version\"}'"
-            ]
-        }),
-        _ => json!({ "argv": [], "agent_json": [] }),
+        ),
+        "list" => example_list(
+            &["mk list --output json"],
+            &["mk -j '{\"command\":\"list\"}'"],
+        ),
+        "doctor" => example_list(
+            &["mk doctor --output json"],
+            &["mk -j '{\"command\":\"doctor\"}'"],
+        ),
+        "schema" => example_list(
+            &["mk schema --format json-schema query", "mk schema query"],
+            &["mk -j '{\"command\":\"schema\",\"format\":\"json-schema\",\"schema\":\"query\"}'"],
+        ),
+        "serve" => example_list(
+            &["mk serve --pack ./memory-pack --host 127.0.0.1 --port 4242 --foreground"],
+            &["mk -j '{\"command\":\"serve\",\"pack\":\"./memory-pack\",\"host\":\"127.0.0.1\",\"port\":4242,\"foreground\":true}'"],
+        ),
+        "stop" => example_list(
+            &["mk stop --port 4242"],
+            &["mk -j '{\"command\":\"stop\",\"port\":4242}'"],
+        ),
+        "help" => example_list(
+            &["mk help", "mk --help"],
+            &["mk -j '{\"command\":\"help\"}'"],
+        ),
+        "version" => example_list(
+            &["mk version", "mk -V"],
+            &["mk -j '{\"command\":\"version\"}'"],
+        ),
+        _ => example_list(&[], &[]),
     }
 }
 
@@ -174,10 +137,10 @@ fn json_schema_attach_examples(mut schema: serde_json::Value, example_instances:
     schema
 }
 
-/// Output shape for `mk schema`: legacy memkit wrapper vs JSON Schema for `--json` inputs.
+/// Output shape for `mk schema`: memkit wrapper vs JSON Schema for `--json` inputs (both printed as YAML).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchemaFormat {
-    /// Pretty-printed memkit schema object (`command` + `input` / `output` descriptions).
+    /// Memkit schema object (`command` + `input` / `output` descriptions), YAML on stdout.
     Memkit,
     /// [JSON Schema](https://json-schema.org/) for the `--json` input object per command.
     JsonSchema,
@@ -322,6 +285,16 @@ pub fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
         _ => return None,
     };
     Some(attach_examples(cmd, base))
+}
+
+fn print_value_as_yaml(value: &serde_json::Value) -> Result<()> {
+    let yaml = serde_yaml::to_string(value).map_err(|e| anyhow!("serialize schema as YAML: {}", e))?;
+    let trimmed = yaml.trim_end();
+    println!(
+        "{}",
+        crate::term::style_stdout(trimmed, |s| s.cyan().to_string())
+    );
+    Ok(())
 }
 
 /// JSON Schema (draft 2020-12) for the `--json` body of each command (excluding outer `"command"`).
@@ -512,15 +485,12 @@ fn input_json_schema_for_command(cmd: &str) -> Option<serde_json::Value> {
 pub fn print_schema(cmd: Option<&str>, format: SchemaFormat) -> Result<()> {
     match (cmd, format) {
         (None, SchemaFormat::Memkit) => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "commands": SCHEMA_COMMANDS,
-                    "usage": "mk schema [--format json|json-schema] [command]",
-                    "global": global_block(),
-                    "examples": all_examples_map(),
-                }))?
-            );
+            print_value_as_yaml(&serde_json::json!({
+                "commands": SCHEMA_COMMANDS,
+                "usage": "mk schema [--format json|json-schema] [command]",
+                "global": global_block(),
+                "examples": all_examples_map(),
+            }))?;
         }
         (None, SchemaFormat::JsonSchema) => {
             anyhow::bail!(
@@ -530,14 +500,14 @@ pub fn print_schema(cmd: Option<&str>, format: SchemaFormat) -> Result<()> {
         }
         (Some(c), SchemaFormat::Memkit) => {
             if let Some(schema) = schema_for_command(c) {
-                println!("{}", serde_json::to_string_pretty(&schema)?);
+                print_value_as_yaml(&schema)?;
             } else {
                 anyhow::bail!("unknown schema: {}. available: {}", c, SCHEMA_COMMANDS.join(", "));
             }
         }
         (Some(c), SchemaFormat::JsonSchema) => {
             if let Some(schema) = input_json_schema_for_command(c) {
-                println!("{}", serde_json::to_string_pretty(&schema)?);
+                print_value_as_yaml(&schema)?;
             } else {
                 anyhow::bail!("unknown schema: {}. available: {}", c, SCHEMA_COMMANDS.join(", "));
             }
