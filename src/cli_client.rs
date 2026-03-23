@@ -4,7 +4,89 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 
+use crate::registry::{Registry, RegistryPack};
 use crate::term;
+
+fn pack_path_display(p: &RegistryPack, home_canon: &Option<PathBuf>) -> String {
+    let path_is_home = PathBuf::from(&p.path)
+        .canonicalize()
+        .ok()
+        .as_ref()
+        == home_canon.as_ref();
+    if path_is_home {
+        "~/.memkit".to_string()
+    } else {
+        p.path.clone()
+    }
+}
+
+fn pack_list_paren_label(p: &RegistryPack, reg: &Registry, home_canon: &Option<PathBuf>) -> Option<String> {
+    if let Some(ref n) = p.name {
+        return Some(format!("({})", n));
+    }
+    let path_is_home = PathBuf::from(&p.path)
+        .canonicalize()
+        .ok()
+        .as_ref()
+        == home_canon.as_ref();
+    let is_default_pack = p.default
+        || reg.default_path.as_deref() == Some(p.path.as_str())
+        || reg.packs.len() == 1
+        || (path_is_home && reg.default_path.is_none());
+    if is_default_pack {
+        Some("(default)".to_string())
+    } else {
+        None
+    }
+}
+
+fn bracket_local_cloud(c: bool, local_on: bool, cloud_on: bool) -> String {
+    let local = if local_on {
+        term::magenta_words(c, "[local]")
+    } else {
+        term::dimmed_word(c, "[local]")
+    };
+    let cloud = if cloud_on {
+        term::magenta_words(c, "[cloud]")
+    } else {
+        term::dimmed_word(c, "[cloud]")
+    };
+    format!("{} {}", local, cloud)
+}
+
+/// Strip internal `sources/<copy>/` prefix from status file tree lines for display.
+fn user_facing_file_tree(file_tree: &str) -> String {
+    if file_tree.is_empty() {
+        return String::new();
+    }
+    file_tree
+        .lines()
+        .map(|line| {
+            let prefix = if line.starts_with("├── ") {
+                Some("├── ")
+            } else if line.starts_with("└── ") {
+                Some("└── ")
+            } else {
+                None
+            };
+            let Some(p) = prefix else {
+                return line.to_string();
+            };
+            let rest = line[p.len()..].replace('\\', "/");
+            if let Some(after_sources) = rest.strip_prefix("sources/") {
+                if let Some(idx) = after_sources.find('/') {
+                    let after_name = &after_sources[idx + 1..];
+                    format!("{}{}", p, after_name)
+                } else {
+                    format!("{}{}", p, after_sources)
+                }
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -144,15 +226,16 @@ pub async fn ensure_server(cfg: &ServerConfig) -> Result<()> {
     wait_for_server_ready(cfg).await
 }
 
-/// One-line hint on stderr: server port (after a successful `ensure_server`).
+/// One-line hint on stderr: server live + port (after a successful `ensure_server`).
 pub fn print_server_note_running(cfg: &ServerConfig, output_json: bool) {
     if output_json {
         return;
     }
     let c = term::color_stderr();
     eprintln!(
-        "{}",
-        term::data_num(c, format!("server running on port {}", cfg.port))
+        "{} {}",
+        "Server is live",
+        term::bracketed_cyan(c, &format!(":{}", cfg.port))
     );
 }
 
@@ -163,7 +246,6 @@ pub async fn print_server_note_doctor(cfg: &ServerConfig, output_json: bool) {
     }
     let c = term::color_stderr();
     if server_is_up(cfg).await {
-        print_server_note_running(cfg, false);
         return;
     }
     let hint = format!("mk serve --host {} --port {}", cfg.host, cfg.port);
@@ -222,7 +304,8 @@ pub fn print_status(data: &Value) {
     let vector_count = data.get("vector_count").and_then(Value::as_u64).unwrap_or(0) as usize;
     let entities = data.get("entities").and_then(Value::as_u64).unwrap_or(0) as usize;
     let relationships = data.get("relationships").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let file_tree = data.get("file_tree").and_then(Value::as_str).unwrap_or("");
+    let file_tree_raw = data.get("file_tree").and_then(Value::as_str).unwrap_or("");
+    let file_tree = user_facing_file_tree(file_tree_raw);
     let pending_removal = data.get("pending_removal").and_then(Value::as_bool).unwrap_or(false);
     let pending_add = data.get("pending_add").and_then(Value::as_bool).unwrap_or(false);
     let jobs = data.get("jobs").and_then(Value::as_object);
@@ -269,7 +352,7 @@ pub fn print_status(data: &Value) {
         println!("{}", term::sync_local_only_label(c));
         if !file_tree.is_empty() {
             println!();
-            println!("{}", term::dimmed_word(c, file_tree));
+            println!("{}", term::dimmed_word(c, &file_tree));
         }
         println!();
         println!(
@@ -343,36 +426,36 @@ pub async fn list(cfg: &ServerConfig, output_json: bool) -> Result<Value> {
                 .get("pack_path")
                 .and_then(Value::as_str)
                 .unwrap_or("?");
-            let sources = data.get("sources").and_then(Value::as_array).cloned().unwrap_or_default();
+            let indexed = data.get("indexed").and_then(Value::as_bool).unwrap_or(false);
+            let vector_count = data.get("vector_count").and_then(Value::as_u64).unwrap_or(0);
+            let indexed_here = indexed && vector_count > 0;
+            let local_on = indexed_here;
+            let cloud_on = false;
             let active_job = data.get("jobs").and_then(|j| j.get("active"));
 
             let c = term::color_stdout();
-            if c {
-                println!(
-                    "{}  {}",
-                    term::bold_word(c, pack_path),
-                    term::sync_local_only_label(c)
-                );
-                for s in sources.iter().take(10) {
-                    let path = s.get("root_path").and_then(Value::as_str).unwrap_or("?");
-                    println!("  {}", term::dimmed_word(c, path));
-                }
-                if let Some(obj) = active_job.and_then(Value::as_object) {
-                    let job_id = obj.get("id").and_then(Value::as_str).unwrap_or("?");
+            let tags = bracket_local_cloud(c, local_on, cloud_on);
+            let label = "(default)";
+            let line = if c {
+                format!(
+                    "{} {} {}",
+                    term::white_word(c, pack_path),
+                    tags,
+                    term::cyan_label(c, label)
+                )
+            } else {
+                format!("{} {} {}", pack_path, tags, label)
+            };
+            println!("{}", line);
+            if let Some(obj) = active_job.and_then(Value::as_object) {
+                let job_id = obj.get("id").and_then(Value::as_str).unwrap_or("?");
+                if c {
                     println!(
                         "  {} {}",
                         term::dimmed_word(c, job_id),
                         term::warn_words(c, "...pending")
                     );
-                }
-            } else {
-                println!("{}  sync: local only", pack_path);
-                for s in sources.iter().take(10) {
-                    let path = s.get("root_path").and_then(Value::as_str).unwrap_or("?");
-                    println!("  {}", path);
-                }
-                if let Some(obj) = active_job.and_then(Value::as_object) {
-                    let job_id = obj.get("id").and_then(Value::as_str).unwrap_or("?");
+                } else {
                     println!("  {} ...pending", job_id);
                 }
             }
@@ -383,64 +466,38 @@ pub async fn list(cfg: &ServerConfig, output_json: bool) -> Result<Value> {
     if !output_json {
         let c = term::color_stdout();
         let home_canon = dirs::home_dir().and_then(|h| h.canonicalize().ok());
-        let default_path = reg.default_path.as_deref();
+        let max_path_w = reg
+            .packs
+            .iter()
+            .map(|p| pack_path_display(p, &home_canon).len())
+            .max()
+            .unwrap_or(0);
         for p in &reg.packs {
-            let default_marker = if p.default { " (default)" } else { "" };
-            let path_is_home = PathBuf::from(&p.path).canonicalize().ok().as_ref() == home_canon.as_ref();
-            let path_display = if path_is_home { "~/.memkit" } else { p.path.as_str() };
-            let is_default_pack = p.default
-                || default_path == Some(p.path.as_str())
-                || (reg.packs.len() == 1)
-                || (path_is_home && default_path.is_none());
-            let (lead, path_part) = if is_default_pack {
-                ("default", path_display)
-            } else if let Some(ref name) = p.name {
-                (name.as_str(), path_display)
-            } else {
-                (path_display, "")
-            };
-            if c {
-                let cloud = if p.cloud {
-                    term::data_num(c, "[cloud]")
-                } else {
-                    term::dimmed_word(c, "cloud")
-                };
-                if path_part.is_empty() {
-                    println!(
-                        "{} {} {} {}",
-                        term::bold_word(c, lead),
-                        term::dimmed_word(c, "local"),
-                        cloud,
-                        term::dimmed_word(c, default_marker)
-                    );
-                } else {
-                    println!(
-                        "{} {} {} {} {}",
-                        term::bold_word(c, lead),
-                        term::dimmed_word(c, path_part),
-                        term::dimmed_word(c, "local"),
-                        cloud,
-                        term::dimmed_word(c, default_marker)
-                    );
-                }
-            } else {
-                let cloud = if p.cloud { "[cloud]" } else { "cloud" };
-                if path_part.is_empty() {
-                    println!("{} local {} {}", lead, cloud, default_marker);
-                } else {
-                    println!("{}  {} local {} {}", lead, path_part, cloud, default_marker);
-                }
-            }
-            // Show sources and pending job for this pack (requires server).
+            let path_display = pack_path_display(p, &home_canon);
+            let padded_path = format!("{:<width$}", path_display, width = max_path_w);
+            let paren = pack_list_paren_label(p, &reg, &home_canon);
             if let Ok(data) = status(cfg, Some(&p.path)).await {
-                let sources = data.get("sources").and_then(Value::as_array).map_or([].as_ref(), |v| v.as_slice());
-                for s in sources.iter().take(20) {
-                    let path = s.get("root_path").and_then(Value::as_str).unwrap_or("?");
-                    if c {
-                        println!("  {}", term::dimmed_word(c, path));
+                let indexed = data.get("indexed").and_then(Value::as_bool).unwrap_or(false);
+                let vector_count = data.get("vector_count").and_then(Value::as_u64).unwrap_or(0);
+                let indexed_here = indexed && vector_count > 0;
+                let local_on = indexed_here && p.local;
+                let cloud_on = indexed_here && p.cloud;
+                let tags = bracket_local_cloud(c, local_on, cloud_on);
+                if c {
+                    if let Some(ref lab) = paren {
+                        println!(
+                            "{} {} {}",
+                            term::white_word(c, &padded_path),
+                            tags,
+                            term::cyan_label(c, lab)
+                        );
                     } else {
-                        println!("  {}", path);
+                        println!("{} {}", term::white_word(c, &padded_path), tags);
                     }
+                } else if let Some(ref lab) = paren {
+                    println!("{} {} {}", padded_path, tags, lab);
+                } else {
+                    println!("{} {}", padded_path, tags);
                 }
                 let active_job = data.get("jobs").and_then(|j| j.get("active"));
                 if let Some(obj) = active_job.and_then(Value::as_object) {
@@ -487,25 +544,43 @@ pub async fn list(cfg: &ServerConfig, output_json: bool) -> Result<Value> {
                 let is_remove_job_for_this_pack =
                     is_remove_for_active || queued_jobs.iter().any(remove_for_pack);
                 let status_line = if is_remove_job_for_this_pack {
-                    "removing...".to_string()
+                    Some("removing...".to_string())
                 } else if let Some(ref obj) = active_obj {
                     let id = obj.get("id").and_then(Value::as_str).unwrap_or("?");
-                    format!("indexing ({}) — {}", id, counts_suffix)
-                } else if indexed {
-                    format!("indexed, {}", counts_suffix)
+                    Some(format!("indexing ({}) — {}", id, counts_suffix))
+                } else if !indexed {
+                    Some(format!("not indexed ({})", counts_suffix))
                 } else {
-                    format!("not indexed ({})", counts_suffix)
+                    None
                 };
-                if c {
-                    if active_obj.is_some() {
-                        println!("  {}", term::warn_words(c, &status_line));
-                    } else if indexed {
-                        println!("  {}", term::success_words(c, &status_line));
+                if let Some(ref line) = status_line {
+                    if c {
+                        if active_obj.is_some() {
+                            println!("  {}", term::warn_words(c, line));
+                        } else {
+                            println!("  {}", term::dimmed_word(c, line));
+                        }
                     } else {
-                        println!("  {}", term::dimmed_word(c, &status_line));
+                        println!("  {}", line);
                     }
+                }
+            } else {
+                let tags = bracket_local_cloud(c, false, false);
+                if c {
+                    if let Some(ref lab) = paren {
+                        println!(
+                            "{} {} {}",
+                            term::white_word(c, &padded_path),
+                            tags,
+                            term::cyan_label(c, lab)
+                        );
+                    } else {
+                        println!("{} {}", term::white_word(c, &padded_path), tags);
+                    }
+                } else if let Some(ref lab) = paren {
+                    println!("{} {} {}", padded_path, tags, lab);
                 } else {
-                    println!("  {}", status_line);
+                    println!("{} {}", padded_path, tags);
                 }
             }
         }
