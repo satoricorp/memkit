@@ -794,62 +794,50 @@ fn print_models_section() {
     let cfg = config::load_config().unwrap_or_default();
     let supported = config::supported_models();
     let c = crate::term::color_stdout();
-    if c {
-        println!("{}", crate::term::section_title(c, "Models"));
-        println!();
-        if let Some(ref m) = cfg.model {
-            println!(
-                "  {} {}",
-                crate::term::bold_word(c, "Current:"),
-                m
-            );
+    println!();
+    println!("{}", crate::term::section_title(c, "Available Models:"));
+    for (id, desc) in &supported {
+        let mark = if cfg.model.as_deref() == Some(*id) {
+            "[*]"
         } else {
+            "[ ]"
+        };
+        if c {
             println!(
-                "  {} {}",
-                crate::term::bold_word(c, "Current:"),
-                crate::term::dimmed_word(c, "(none set)")
-            );
-        }
-        println!();
-        println!("  {}", crate::term::bold_word(c, "Supported:"));
-        for (id, desc) in &supported {
-            println!(
-                "    {}  {}",
-                crate::term::data_num(c, id),
+                "  {}  {}  {}",
+                crate::term::magenta_words(c, mark),
+                crate::term::data_num(c, *id),
                 crate::term::dimmed_word(c, desc)
             );
-        }
-        println!();
-        println!(
-            "  {}",
-            crate::term::dimmed_word(
-                c,
-                "Run 'mk use model <id>' to set a default model."
-            )
-        );
-    } else {
-        if let Some(ref m) = cfg.model {
-            println!("Current: {}", m);
         } else {
-            println!("Current: (none set)");
+            println!("  {}  {}  {}", mark, id, desc);
         }
-        println!("Supported:");
-        for (id, desc) in &supported {
-            println!("  {}  {}", id, desc);
-        }
-        println!();
-        println!("Run 'mk use model <id>' to set a default model.");
     }
+    println!();
+    println!(
+        "  {}",
+        crate::term::dimmed_word(
+            c,
+            "Run 'mk use model <id>' to set a default model."
+        )
+    );
 }
 
 /// `tail` includes any leading spaces after the subcommand (e.g. ` " <args>…"` or ` "   (note)"`).
-fn print_help_cmd_line(c: bool, sub: &str, tail: &str) {
+fn print_help_cmd_line_grouped(c: bool, sub: &str, tail: &str) {
     println!(
-        "  {} {}{}",
+        "    {} {}{}",
         crate::term::mk_binary(c),
         crate::term::bold_word(c, sub),
         crate::term::dimmed_word(c, tail)
     );
+}
+
+fn print_help_section(c: bool, title: &str, first: bool) {
+    if !first {
+        println!();
+    }
+    println!("  {}", crate::term::section_title(c, title));
 }
 
 fn print_help() {
@@ -873,34 +861,41 @@ fn print_help() {
         crate::term::dimmed_word(c, "Global flags: [--output json|text] [--dry-run] [--version | -V]")
     );
     println!();
-    print_help_cmd_line(c, "add", " <path-or-url> [--pack <name-or-path>]");
-    print_help_cmd_line(c, "remove", " [dir]");
-    print_help_cmd_line(
+    println!("{}", crate::term::dimmed_word(c, "Commands:"));
+    println!();
+    print_help_section(c, "Storage", true);
+    print_help_cmd_line_grouped(c, "add", " <path-or-url> [--pack <name-or-path>]");
+    print_help_cmd_line_grouped(c, "remove", " [dir]");
+    print_help_cmd_line_grouped(
         c,
         "status",
         " [dir]   (omit dir to list all registered packs)",
     );
-    print_help_cmd_line(
-        c,
-        "query",
-        " <text> [--top-k N] [--no-rerank] [--pack <name-or-path>] [--raw]",
-    );
-    print_help_cmd_line(
+    print_help_cmd_line_grouped(
         c,
         "publish",
         " [--pack <name-or-path>] [--destination s3://bucket/prefix]",
     );
-    print_help_cmd_line(
+    print_help_section(c, "Search", false);
+    print_help_cmd_line_grouped(
+        c,
+        "query",
+        " <text> [--top-k N] [--no-rerank] [--pack <name-or-path>] [--raw]",
+    );
+    print_help_section(c, "Defaults", false);
+    print_help_cmd_line_grouped(
         c,
         "list",
         "   (registered packs and current/supported models)",
     );
-    print_help_cmd_line(c, "use pack", " <name-or-path>   (set default pack)");
-    print_help_cmd_line(c, "use model", " <model-id>   (set default model)");
-    print_help_cmd_line(c, "doctor", "   (config path + server /health reachability)");
-    print_help_cmd_line(c, "serve", " [--pack <path>] [--host H] [--port P] [--foreground]");
-    print_help_cmd_line(c, "stop", " [--port P]");
-    print_help_cmd_line(c, "schema", " [--format json|json-schema] [command]");
+    print_help_cmd_line_grouped(c, "use pack", " <name-or-path>   (set default pack)");
+    print_help_cmd_line_grouped(c, "use model", " <model-id>   (set default model)");
+    print_help_section(c, "Server", false);
+    print_help_cmd_line_grouped(c, "serve", " [--pack <path>] [--host H] [--port P] [--foreground]");
+    print_help_cmd_line_grouped(c, "stop", " [--port P]");
+    print_help_section(c, "Diagnostics & Schemas", false);
+    print_help_cmd_line_grouped(c, "doctor", "   (config path + server /health reachability)");
+    print_help_cmd_line_grouped(c, "schema", " [--format json|json-schema] [command]");
 }
 
 fn print_version() {
@@ -1292,24 +1287,26 @@ async fn run() -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&data)?);
                     } else {
                         let c = crate::term::color_stdout();
-                        println!("{}", crate::term::section_title(c, "memkit doctor"));
-                        println!(
-                            "{} {}",
-                            crate::term::bold_word(c, "config:"),
-                            data["config_path"].as_str().unwrap_or("")
-                        );
+                        let url = data["server_url"].as_str().unwrap_or("");
                         let reachable = data["server_reachable"].as_bool().unwrap_or(false);
-                        let state = if reachable {
-                            crate::term::success_words(c, "reachable")
+                        if reachable {
+                            print!("Server is reachable ");
+                            println!("{}", crate::term::bracketed_cyan(c, url));
                         } else {
-                            crate::term::danger_words(c, "not reachable")
-                        };
-                        println!(
-                            "{} {} ({})",
-                            crate::term::bold_word(c, "server:"),
-                            state,
-                            data["server_url"].as_str().unwrap_or("")
-                        );
+                            print!("Server is ");
+                            print!("{}", crate::term::danger_words(c, "not reachable"));
+                            print!(" ");
+                            println!("{}", crate::term::bracketed_cyan(c, url));
+                        }
+                        let path = data["config_path"].as_str().unwrap_or("");
+                        let config_ok = data["config_exists"].as_bool().unwrap_or(false);
+                        if config_ok {
+                            print!("Configuration is valid ");
+                            println!("{}", crate::term::bracketed_cyan(c, path));
+                        } else {
+                            print!("Configuration file missing ");
+                            println!("{}", crate::term::bracketed_cyan(c, path));
+                        }
                     }
                     Ok(CommandOut::Done)
                 }
