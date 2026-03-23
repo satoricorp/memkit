@@ -144,20 +144,19 @@ pub async fn ensure_server(cfg: &ServerConfig) -> Result<()> {
     wait_for_server_ready(cfg).await
 }
 
-/// One-line hint on stderr: server URL (after a successful `ensure_server`).
+/// One-line hint on stderr: server port (after a successful `ensure_server`).
 pub fn print_server_note_running(cfg: &ServerConfig, output_json: bool) {
     if output_json {
         return;
     }
     let c = term::color_stderr();
     eprintln!(
-        "{} {}",
-        term::dimmed_word(c, "Server:"),
-        term::data_num(c, cfg.base_url())
+        "{}",
+        term::data_num(c, format!("server running on port {}", cfg.port))
     );
 }
 
-/// One-line hint on stderr for `mk doctor`: URL if up, else background `mk serve` command.
+/// One-line hint on stderr for `mk doctor`: port status if up, else how to start `mk serve`.
 pub async fn print_server_note_doctor(cfg: &ServerConfig, output_json: bool) {
     if output_json {
         return;
@@ -170,8 +169,8 @@ pub async fn print_server_note_doctor(cfg: &ServerConfig, output_json: bool) {
     let hint = format!("mk serve --host {} --port {}", cfg.host, cfg.port);
     eprintln!(
         "{} {} {}",
-        term::dimmed_word(c, "Server:"),
-        term::dimmed_word(c, "not running — start with:"),
+        term::data_num(c, "server not running"),
+        term::dimmed_word(c, "— start with:"),
         term::warn_words(c, &hint)
     );
 }

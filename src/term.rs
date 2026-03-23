@@ -106,6 +106,15 @@ pub fn data_num(color: bool, s: impl Display) -> String {
     }
 }
 
+/// Model id in query banners (magenta).
+pub fn magenta_words(color: bool, s: &str) -> String {
+    if color {
+        s.magenta().to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 pub fn success_words(color: bool, s: &str) -> String {
     if color {
         s.green().to_string()
