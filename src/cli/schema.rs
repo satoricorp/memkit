@@ -115,8 +115,14 @@ fn examples_for_command(cmd: &str) -> serde_json::Value {
     }
 }
 
-fn all_examples_map() -> serde_json::Value {
+/// Top-level `mk schema` document: `usage`, `global`, then one key per command with example lines.
+fn memkit_schema_index() -> serde_json::Value {
     let mut m = serde_json::Map::new();
+    m.insert(
+        "usage".to_string(),
+        json!("mk schema [--format json|json-schema] [command]"),
+    );
+    m.insert("global".to_string(), global_block());
     for c in SCHEMA_COMMANDS {
         m.insert(c.to_string(), examples_for_command(c));
     }
@@ -485,12 +491,7 @@ fn input_json_schema_for_command(cmd: &str) -> Option<serde_json::Value> {
 pub fn print_schema(cmd: Option<&str>, format: SchemaFormat) -> Result<()> {
     match (cmd, format) {
         (None, SchemaFormat::Memkit) => {
-            print_value_as_yaml(&serde_json::json!({
-                "commands": SCHEMA_COMMANDS,
-                "usage": "mk schema [--format json|json-schema] [command]",
-                "global": global_block(),
-                "examples": all_examples_map(),
-            }))?;
+            print_value_as_yaml(&memkit_schema_index())?;
         }
         (None, SchemaFormat::JsonSchema) => {
             anyhow::bail!(
