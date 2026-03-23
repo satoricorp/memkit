@@ -143,6 +143,15 @@ pub fn magenta_words(color: bool, s: &str) -> String {
     }
 }
 
+/// Active `[local]` / `[cloud]` tags in pack list (cyan when on).
+pub fn cyan_words(color: bool, s: &str) -> String {
+    if color {
+        s.cyan().to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 pub fn success_words(color: bool, s: &str) -> String {
     if color {
         s.green().to_string()

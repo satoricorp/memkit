@@ -42,12 +42,12 @@ fn pack_list_paren_label(p: &RegistryPack, reg: &Registry, home_canon: &Option<P
 
 fn bracket_local_cloud(c: bool, local_on: bool, cloud_on: bool) -> String {
     let local = if local_on {
-        term::magenta_words(c, "[local]")
+        term::cyan_words(c, "[local]")
     } else {
         term::dimmed_word(c, "[local]")
     };
     let cloud = if cloud_on {
-        term::magenta_words(c, "[cloud]")
+        term::cyan_words(c, "[cloud]")
     } else {
         term::dimmed_word(c, "[cloud]")
     };
@@ -264,12 +264,16 @@ pub async fn poll_until_index_done(cfg: &ServerConfig, pack_path: &str) -> Resul
     let deadline = std::time::Instant::now() + MAX_WAIT;
     while std::time::Instant::now() < deadline {
         let data = status(cfg, Some(pack_path)).await?;
-        let active = data
-            .get("jobs")
-            .and_then(|j| j.get("active"))
-            .map(|v| !v.is_null())
-            .unwrap_or(false);
-        if !active {
+        let busy = data
+            .get("pack_indexing_busy")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| {
+                data.get("jobs")
+                    .and_then(|j| j.get("active"))
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false)
+            });
+        if !busy {
             return Ok(());
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -295,6 +299,28 @@ pub async fn status(cfg: &ServerConfig, dir: Option<&str>) -> Result<Value> {
     Ok(serde_json::from_str(&body)?)
 }
 
+/// Prints one line per path in `job.indexing_sources`. Returns true if any line was printed.
+fn print_indexing_lines_from_job(c: bool, job: &Value, label: &str) -> bool {
+    let bold = label == "indexing...";
+    let Some(sources) = job.get("indexing_sources").and_then(Value::as_array) else {
+        return false;
+    };
+    if sources.is_empty() {
+        return false;
+    }
+    for s in sources {
+        if let Some(path) = s.as_str() {
+            let suffix = if bold {
+                term::bold_green(c, label)
+            } else {
+                term::dimmed_word(c, label)
+            };
+            println!("  {} {}", term::white_word(c, path), suffix);
+        }
+    }
+    true
+}
+
 pub fn print_status(data: &Value) {
     let pack_path = data
         .get("pack_path")
@@ -309,8 +335,27 @@ pub fn print_status(data: &Value) {
     let pending_removal = data.get("pending_removal").and_then(Value::as_bool).unwrap_or(false);
     let pending_add = data.get("pending_add").and_then(Value::as_bool).unwrap_or(false);
     let jobs = data.get("jobs").and_then(Value::as_object);
-    let active_job = jobs.and_then(|j| j.get("active")).map(|v| !v.is_null()).unwrap_or(false);
-    let active_job_id = jobs.and_then(|j| j.get("active")).and_then(Value::as_object).and_then(|o| o.get("id")).and_then(Value::as_str);
+    let active_val = jobs.and_then(|j| {
+        if j.contains_key("active_for_this_pack") {
+            j.get("active_for_this_pack").filter(|v| !v.is_null())
+        } else {
+            j.get("active").filter(|v| !v.is_null())
+        }
+    });
+    let active_job_id = active_val
+        .and_then(Value::as_object)
+        .and_then(|o| o.get("id"))
+        .and_then(Value::as_str);
+    let queued_for_pack = jobs
+        .and_then(|j| {
+            if j.contains_key("queued_jobs_for_this_pack") {
+                j.get("queued_jobs_for_this_pack").and_then(Value::as_array)
+            } else {
+                j.get("queued_jobs").and_then(Value::as_array)
+            }
+        })
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
     let queued_jobs = jobs.and_then(|j| j.get("queued_jobs")).and_then(Value::as_array).map(|a| a.as_slice()).unwrap_or(&[]);
     let last_job = jobs.and_then(|j| j.get("last_completed")).and_then(Value::as_object);
     let last_job_failed = last_job.and_then(|j| j.get("state")).and_then(Value::as_str) == Some("Failed");
@@ -326,21 +371,34 @@ pub fn print_status(data: &Value) {
                 term::warn_words(c, "removing...")
             );
         } else if pending_add {
-            let id = active_job_id.unwrap_or("?");
-            println!(
-                "{} {} {}",
-                term::bold_word(c, pack_path),
-                term::dimmed_word(c, id),
-                term::warn_words(c, "...pending")
-            );
-        } else if active_job {
-            let id = active_job_id.unwrap_or("?");
-            println!(
-                "{} {} {}",
-                term::bold_word(c, pack_path),
-                term::dimmed_word(c, id),
-                term::warn_words(c, "...pending")
-            );
+            println!("{}", term::bold_word(c, pack_path));
+            let mut printed_indexing = false;
+            if let Some(av) = active_val {
+                if print_indexing_lines_from_job(c, av, "indexing...") {
+                    printed_indexing = true;
+                } else {
+                    let id = active_job_id.unwrap_or("?");
+                    println!(
+                        "  {} {}",
+                        term::dimmed_word(c, id),
+                        term::bold_green(c, "indexing...")
+                    );
+                    printed_indexing = true;
+                }
+            }
+            for q in queued_for_pack {
+                if print_indexing_lines_from_job(c, q, "queued...") {
+                    printed_indexing = true;
+                }
+            }
+            if !printed_indexing {
+                let id = active_job_id.unwrap_or("?");
+                println!(
+                    "  {} {}",
+                    term::dimmed_word(c, id),
+                    term::warn_words(c, "...pending")
+                );
+            }
         } else if indexed {
             println!(
                 "{} successfully indexed",
@@ -364,13 +422,15 @@ pub fn print_status(data: &Value) {
             term::data_num(c, entities),
             term::data_num(c, relationships)
         );
-        for q in queued_jobs {
-            if let Some(id) = q.get("id").and_then(Value::as_str) {
-                println!(
-                    "  {} {}",
-                    term::dimmed_word(c, id),
-                    term::warn_words(c, "...pending")
-                );
+        if !pending_add {
+            for q in queued_jobs {
+                if let Some(id) = q.get("id").and_then(Value::as_str) {
+                    println!(
+                        "  {} {}",
+                        term::dimmed_word(c, id),
+                        term::warn_words(c, "...pending")
+                    );
+                }
             }
         }
         if !indexed && last_job_failed {
@@ -386,9 +446,27 @@ pub fn print_status(data: &Value) {
     } else {
         if pending_removal {
             println!("{} removing...", pack_path);
-        } else if pending_add || active_job {
-            let id = active_job_id.unwrap_or("?");
-            println!("{} {} ...pending", pack_path, id);
+        } else if pending_add {
+            println!("{}", pack_path);
+            let mut printed = false;
+            if let Some(av) = active_val {
+                if print_indexing_lines_from_job(c, av, "indexing...") {
+                    printed = true;
+                } else {
+                    let id = active_job_id.unwrap_or("?");
+                    println!("  {} indexing...", id);
+                    printed = true;
+                }
+            }
+            for q in queued_for_pack {
+                if print_indexing_lines_from_job(c, q, "queued...") {
+                    printed = true;
+                }
+            }
+            if !printed {
+                let id = active_job_id.unwrap_or("?");
+                println!("  {} ...pending", id);
+            }
         } else if indexed {
             println!("{} successfully indexed", pack_path);
         } else {
@@ -402,9 +480,11 @@ pub fn print_status(data: &Value) {
         println!();
         println!("{} vector entries", vector_count);
         println!("{} entities, {} relationships", entities, relationships);
-        for q in queued_jobs {
-            if let Some(id) = q.get("id").and_then(Value::as_str) {
-                println!("  {} ...pending", id);
+        if !pending_add {
+            for q in queued_jobs {
+                if let Some(id) = q.get("id").and_then(Value::as_str) {
+                    println!("  {} ...pending", id);
+                }
             }
         }
         if !indexed && last_job_failed {
