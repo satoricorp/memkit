@@ -119,6 +119,77 @@ fn wrap_retrieval_preview(s: &str, width: usize, max_chars: usize) -> String {
     out
 }
 
+/// Terminal width for wrapping query answers (`COLUMNS` or 80).
+fn terminal_columns() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(80)
+        .max(40)
+}
+
+/// Word-wrap `text` to at most `max_chars` Unicode scalar values per line.
+fn wrap_paragraph(text: &str, max_chars: usize) -> Vec<String> {
+    let max_chars = max_chars.max(1);
+    let text = text.trim_end();
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        if word_len > max_chars {
+            if !cur.is_empty() {
+                lines.push(std::mem::take(&mut cur));
+            }
+            let mut chunk = String::new();
+            for ch in word.chars() {
+                if chunk.chars().count() >= max_chars {
+                    lines.push(std::mem::take(&mut chunk));
+                }
+                chunk.push(ch);
+            }
+            if !chunk.is_empty() {
+                cur = chunk;
+            }
+            continue;
+        }
+        let add = if cur.is_empty() {
+            word_len
+        } else {
+            cur.chars().count() + 1 + word_len
+        };
+        if cur.is_empty() {
+            cur.push_str(word);
+        } else if add <= max_chars {
+            cur.push(' ');
+            cur.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur.push_str(word);
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// Physical lines for the query answer: wrap to fit beside `❯ `, preserve explicit newlines.
+fn query_answer_physical_lines(answer: &str, width: usize) -> Vec<String> {
+    const PREFIX_CHARS: usize = 2; // "❯ "
+    let content_width = width.saturating_sub(PREFIX_CHARS).max(8);
+    let mut out = Vec::new();
+    for line in answer.lines() {
+        out.extend(wrap_paragraph(line, content_width));
+    }
+    out
+}
+
 /// For add responses, replace full "content" in job.add_payload.items with a short placeholder so stdout isn't flooded.
 fn trim_add_response_content(out: &serde_json::Value) -> serde_json::Value {
     let mut v = out.clone();
@@ -198,6 +269,24 @@ fn ensure_pack_root(pack_arg: Option<&str>) -> Result<PathBuf> {
         }
     }
     resolve_pack_root(pack_arg)
+}
+
+/// Whether the resolved pack is registered as cloud (skip `file://` links for local CLI).
+fn pack_cloud_for_cli(pack_arg: Option<&str>) -> bool {
+    let Ok(root) = ensure_pack_root(pack_arg) else {
+        return false;
+    };
+    let norm = root.canonicalize().unwrap_or(root);
+    let reg = load_registry().unwrap_or_default();
+    for p in &reg.packs {
+        let Ok(entry_path) = PathBuf::from(&p.path).canonicalize() else {
+            continue;
+        };
+        if entry_path == norm {
+            return p.cloud;
+        }
+    }
+    false
 }
 
 fn parse_pack_paths(value: &str) -> Vec<PathBuf> {
@@ -1233,6 +1322,7 @@ async fn run() -> Result<()> {
                     Ok(CommandOut::Done)
                 }
                 CliCommand::Query { query, top_k, use_reranker, raw, pack } => {
+                    let pack_cloud = pack_cloud_for_cli(pack.as_deref());
                     let out = cli_client::query(&cfg, &QueryArgs { query, top_k, use_reranker, raw }, pack.as_deref()).await?;
                     let use_formatted = !raw && ctx.output_format != OutputFormat::Json;
                     if use_formatted {
@@ -1251,12 +1341,14 @@ async fn run() -> Result<()> {
                                     println!("Top results from your pack:");
                                     for (i, r) in results.iter().take(5).enumerate() {
                                         let path = r.get("file_path").and_then(serde_json::Value::as_str).unwrap_or("?");
+                                        let path_shown =
+                                            crate::google::cli_source_link(path, pack_cloud);
                                         let content = r.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
                                         let preview = if content.len() > 120 { format!("{}...", &content[..120]) } else { content.to_string() };
                                         println!(
                                             "  {}. {} {}",
                                             i + 1,
-                                            crate::term::style_stdout(path, |s| s.dimmed().to_string()),
+                                            crate::term::style_stdout(&path_shown, |s| s.dimmed().to_string()),
                                             crate::term::style_stdout(&preview, |s| s.dimmed().to_string())
                                         );
                                     }
@@ -1268,12 +1360,14 @@ async fn run() -> Result<()> {
                                     println!("Retrieval (vector store, before rerank):");
                                     for (i, r) in rr.iter().take(10).enumerate() {
                                         let path = r.get("file_path").and_then(serde_json::Value::as_str).unwrap_or("?");
+                                        let path_shown =
+                                            crate::google::cli_source_link(path, pack_cloud);
                                         let score = r.get("score").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
                                         let content = r.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
                                         println!(
                                             "  {}. {} score={:.3}",
                                             i + 1,
-                                            crate::term::style_stdout(path, |s| s.dimmed().to_string()),
+                                            crate::term::style_stdout(&path_shown, |s| s.dimmed().to_string()),
                                             score
                                         );
                                         let wrapped = wrap_retrieval_preview(content, 72, 200);
@@ -1290,14 +1384,32 @@ async fn run() -> Result<()> {
                             out.get("sources").and_then(serde_json::Value::as_array),
                         ) {
                             if let Some(model) = out.get("model").and_then(serde_json::Value::as_str) {
-                                println!("Model: {}", model);
-                                println!();
+                                if !model.is_empty() {
+                                    let c = crate::term::color_stdout();
+                                    println!(
+                                        "{}{}",
+                                        crate::term::magenta_words(c, &format!("model: {}", model)),
+                                        crate::term::dimmed_word(
+                                            c,
+                                            " (run `mk use model` to change model)",
+                                        )
+                                    );
+                                    println!();
+                                }
                             }
-                            if let Some(provider) = out.get("provider").and_then(serde_json::Value::as_str) {
-                                println!("[{}]", provider);
-                                println!();
+                            let c = crate::term::color_stdout();
+                            let physical = query_answer_physical_lines(answer, terminal_columns());
+                            for (i, line) in physical.iter().enumerate() {
+                                if i == 0 {
+                                    println!(
+                                        "{} {}",
+                                        crate::term::dimmed_word(c, "❯"),
+                                        line
+                                    );
+                                } else {
+                                    println!("  {}", line);
+                                }
                             }
-                            println!("{}", answer);
                             if !sources.is_empty() {
                                 println!();
                                 println!("Sources:");
@@ -1306,7 +1418,9 @@ async fn run() -> Result<()> {
                                         .get("path")
                                         .and_then(serde_json::Value::as_str)
                                         .unwrap_or("?");
-                                    println!("  {}", path);
+                                    let shown =
+                                        crate::google::cli_source_link(path, pack_cloud);
+                                    println!("  {}", shown);
                                 }
                             }
                             Ok(CommandOut::Done)

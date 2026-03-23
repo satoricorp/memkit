@@ -5,6 +5,7 @@ use std::env;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use url::Url;
 use yup_oauth2::ServiceAccountAuthenticator;
 
 const DOCS_SCOPE: &str = "https://www.googleapis.com/auth/documents.readonly";
@@ -283,6 +284,40 @@ pub async fn fetch_sheet_content(
     Ok(out)
 }
 
+/// Convert stored source paths to browser or file URLs for local CLI text output.
+/// Google-backed `memkit://` URIs always become `https://` links. Absolute filesystem paths
+/// become `file://` URLs only when the active pack is not a cloud pack (`pack_cloud == false`).
+pub fn cli_source_link(path: &str, pack_cloud: bool) -> String {
+    if let Some(doc_id) = path.strip_prefix("memkit://google/doc/") {
+        if !doc_id.is_empty() && !doc_id.contains('/') {
+            return format!("https://docs.google.com/document/d/{}/edit", doc_id);
+        }
+    }
+    if let Some(rest) = path.strip_prefix("memkit://google/sheet/") {
+        if let Some((spreadsheet_id, gid)) = rest.split_once('/') {
+            if !spreadsheet_id.is_empty() && !gid.is_empty() {
+                return format!(
+                    "https://docs.google.com/spreadsheets/d/{}/edit#gid={}",
+                    spreadsheet_id, gid
+                );
+            }
+        }
+    }
+    if path.starts_with("memkit://") {
+        return path.to_string();
+    }
+    if pack_cloud {
+        return path.to_string();
+    }
+    let p = Path::new(path);
+    if p.is_absolute() {
+        if let Ok(u) = Url::from_file_path(p) {
+            return u.to_string();
+        }
+    }
+    path.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +339,31 @@ mod tests {
         let (id, gid) = parse_sheet_ids("abc123").unwrap();
         assert_eq!(id, "abc123");
         assert_eq!(gid, None);
+    }
+
+    #[test]
+    fn test_cli_source_link_google() {
+        let sheet = "memkit://google/sheet/abc/42";
+        assert_eq!(
+            cli_source_link(sheet, true),
+            "https://docs.google.com/spreadsheets/d/abc/edit#gid=42"
+        );
+        assert_eq!(
+            cli_source_link(sheet, false),
+            "https://docs.google.com/spreadsheets/d/abc/edit#gid=42"
+        );
+        let doc = "memkit://google/doc/docid1";
+        assert_eq!(
+            cli_source_link(doc, false),
+            "https://docs.google.com/document/d/docid1/edit"
+        );
+    }
+
+    #[test]
+    fn test_cli_source_link_file_local_only() {
+        let p = "/tmp/memkit_cli_source_test";
+        let with_file = cli_source_link(p, false);
+        assert!(with_file.starts_with("file:///"), "{}", with_file);
+        assert_eq!(cli_source_link(p, true), p);
     }
 }
