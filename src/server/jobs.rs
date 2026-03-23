@@ -35,6 +35,9 @@ pub(crate) struct JobRecord {
     /// For AddDocuments: { "pack_path": string, "items": [ { "content": string, "source_path": string } ] }
     #[serde(skip_serializing_if = "Option::is_none")]
     pub add_payload: Option<Value>,
+    /// Directory or source roots being indexed in this job (for CLI status).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexing_sources: Option<Vec<String>>,
     pub enqueued_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,

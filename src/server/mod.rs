@@ -189,6 +189,30 @@ async fn health(State(_state): State<AppState>) -> (StatusCode, Json<HealthRespo
     )
 }
 
+fn job_targets_this_pack(
+    j: &JobRecord,
+    pack_root: Option<&str>,
+    pack_dir: Option<&str>,
+) -> bool {
+    let Some(ref jp) = j.pack_path else {
+        return false;
+    };
+    if Some(jp.as_str()) == pack_root {
+        return true;
+    }
+    if Some(jp.as_str()) == pack_dir {
+        return true;
+    }
+    false
+}
+
+fn job_is_index_work(j: &JobRecord) -> bool {
+    matches!(
+        j.job_type,
+        JobType::IndexSources | JobType::IndexNewPack | JobType::AddDocuments
+    )
+}
+
 async fn status(
     State(state): State<AppState>,
     Query(q): Query<StatusQuery>,
@@ -328,45 +352,110 @@ async fn status(
             .queue
             .iter()
             .filter_map(|id| jobs.find(id))
-            .map(|j| json!({ "id": j.id, "job_type": j.job_type, "pack_path": j.pack_path, "state": j.state }))
+            .map(|j| {
+                let mut v = json!({
+                    "id": j.id,
+                    "job_type": j.job_type,
+                    "pack_path": j.pack_path,
+                    "state": j.state,
+                });
+                if let Some(ref s) = j.indexing_sources {
+                    v["indexing_sources"] = json!(s);
+                }
+                v
+            })
             .collect();
         (active, last, queued_list)
     };
 
+    let pack_root_opt = pack_for_helix.as_ref().and_then(|pack_dir| {
+        pack_dir
+            .parent()
+            .map(PathBuf::from)
+            .or_else(|| Some(pack_dir.clone()))
+            .and_then(|p| p.canonicalize().ok())
+            .map(|p| p.to_string_lossy().to_string())
+    });
+    let pack_dir_opt = pack_for_helix
+        .as_ref()
+        .and_then(|p| p.canonicalize().ok())
+        .map(|p| p.to_string_lossy().to_string());
+    let pr = pack_root_opt.as_deref();
+    let pd = pack_dir_opt.as_deref();
+
     let (pending_removal, pending_add) = if q.path.is_some() {
-        let canonical_root = pack_for_helix
-            .as_ref()
-            .and_then(|pack_dir| {
-                pack_dir
-                    .parent()
-                    .map(PathBuf::from)
-                    .or_else(|| Some(pack_dir.clone()))
-                    .and_then(|p| p.canonicalize().ok())
-                    .map(|p| p.to_string_lossy().to_string())
-            });
-        match &canonical_root {
-            Some(root) => {
-                let root = root.as_str();
-                let active_remove = active_job.as_ref().map_or(false, |j| {
-                    matches!(j.job_type, JobType::RemovePack) && j.pack_path.as_deref() == Some(root)
-                });
-                let queued_remove = queued_list.iter().any(|j| {
-                    j.get("job_type").and_then(Value::as_str) == Some("remove_pack")
-                        && j.get("pack_path").and_then(Value::as_str) == Some(root)
-                });
-                let active_add = active_job.as_ref().map_or(false, |j| {
-                    matches!(j.job_type, JobType::AddDocuments) && j.pack_path.as_deref() == Some(root)
-                });
-                let queued_add = queued_list.iter().any(|j| {
-                    j.get("job_type").and_then(Value::as_str) == Some("add_documents")
-                        && j.get("pack_path").and_then(Value::as_str) == Some(root)
-                });
-                (active_remove || queued_remove, active_add || queued_add)
-            }
-            None => (false, false),
-        }
+        let path_matches_pack = |p: &str| Some(p) == pr || Some(p) == pd;
+        let active_remove = active_job.as_ref().map_or(false, |j| {
+            matches!(j.job_type, JobType::RemovePack)
+                && j.pack_path.as_deref().map(path_matches_pack).unwrap_or(false)
+        });
+        let queued_remove = queued_list.iter().any(|j| {
+            j.get("job_type").and_then(Value::as_str) == Some("remove_pack")
+                && j.get("pack_path")
+                    .and_then(Value::as_str)
+                    .map(path_matches_pack)
+                    .unwrap_or(false)
+        });
+        let active_add = active_job.as_ref().map_or(false, |j| {
+            job_is_index_work(j) && job_targets_this_pack(j, pr, pd)
+        });
+        let queued_add = queued_list.iter().any(|j| {
+            let jt = j.get("job_type").and_then(Value::as_str);
+            let is_index = matches!(
+                jt,
+                Some("index_sources") | Some("index_new_pack") | Some("add_documents")
+            );
+            is_index
+                && j.get("pack_path")
+                    .and_then(Value::as_str)
+                    .map(path_matches_pack)
+                    .unwrap_or(false)
+        });
+        (active_remove || queued_remove, active_add || queued_add)
     } else {
         (false, false)
+    };
+
+    let pack_indexing_busy = if q.path.is_some() {
+        let active_busy = active_job.as_ref().map_or(false, |j| {
+            job_is_index_work(j) && job_targets_this_pack(j, pr, pd)
+        });
+        let queued_busy = queued_list.iter().any(|j| {
+            let jt = j.get("job_type").and_then(Value::as_str);
+            matches!(
+                jt,
+                Some("index_sources") | Some("index_new_pack") | Some("add_documents")
+            ) && j.get("pack_path")
+                .and_then(Value::as_str)
+                .map(|p| Some(p) == pr || Some(p) == pd)
+                .unwrap_or(false)
+        });
+        active_busy || queued_busy
+    } else {
+        false
+    };
+
+    let active_for_this_pack = if q.path.is_some() {
+        active_job
+            .as_ref()
+            .filter(|j| job_targets_this_pack(j, pr, pd))
+            .cloned()
+    } else {
+        None
+    };
+    let queued_jobs_for_this_pack: Vec<Value> = if q.path.is_some() {
+        queued_list
+            .iter()
+            .filter(|j| {
+                j.get("pack_path")
+                    .and_then(Value::as_str)
+                    .map(|p| Some(p) == pr || Some(p) == pd)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
     };
 
     let pack_paths: Vec<String> = state.packs.iter().map(|p| {
@@ -385,11 +474,14 @@ async fn status(
         "sources": sources,
         "pending_removal": pending_removal,
         "pending_add": pending_add,
+        "pack_indexing_busy": pack_indexing_busy,
         "jobs": {
             "active": active_job,
+            "active_for_this_pack": active_for_this_pack,
             "last_completed": last_job,
             "queued": queued_list.len(),
-            "queued_jobs": queued_list
+            "queued_jobs": queued_list,
+            "queued_jobs_for_this_pack": queued_jobs_for_this_pack
         }
     }))
 }
@@ -758,6 +850,7 @@ async fn enqueue_index_job(
     trigger: &str,
     pack_path: Option<String>,
     cleanup_after_index: Option<(String, String)>,
+    indexing_sources: Option<Vec<String>>,
 ) -> Value {
     let mut jobs = state.jobs.lock().await;
     let id = format!("job-{}", jobs.next_id);
@@ -770,6 +863,7 @@ async fn enqueue_index_job(
         pack_path: pack_path.clone(),
         cleanup_after_index: cleanup_after_index.clone(),
         add_payload: None,
+        indexing_sources,
         enqueued_at: Utc::now(),
         started_at: None,
         finished_at: None,
@@ -796,9 +890,10 @@ async fn enqueue_index_new_pack_job(
         job_type: JobType::IndexNewPack,
         state: JobState::Queued,
         trigger: "manual_index".to_string(),
-        pack_path: Some(dir_path),
+        pack_path: Some(dir_path.clone()),
         cleanup_after_index: None,
         add_payload,
+        indexing_sources: Some(vec![dir_path]),
         enqueued_at: Utc::now(),
         started_at: None,
         finished_at: None,
@@ -823,6 +918,7 @@ async fn enqueue_remove_job(state: &AppState, pack_root: String) -> Value {
         pack_path: Some(pack_root),
         cleanup_after_index: None,
         add_payload: None,
+        indexing_sources: None,
         enqueued_at: Utc::now(),
         started_at: None,
         finished_at: None,
@@ -1109,7 +1205,14 @@ async fn add_now(
             )
         })?;
         let pack_path_str = pack_dir.canonicalize().unwrap_or(pack_dir.clone()).to_string_lossy().to_string();
-        let job = enqueue_index_job(&state, "add", Some(pack_path_str), None).await;
+        let job = enqueue_index_job(
+            &state,
+            "add",
+            Some(pack_path_str),
+            None,
+            Some(vec![root_path.clone()]),
+        )
+        .await;
         start_next_job_if_idle(state.clone());
         return Ok(Json(json!({
             "status": "accepted",
