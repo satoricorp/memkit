@@ -15,7 +15,7 @@ mk -j '{"command":"add","path":"./specs","pack":"./memory-pack"}'
 mk -j '{"command":"query","query":"how does auth work","top_k":8}'
 mk -j '{"command":"status","dir":"./memory-pack"}'
 mk -j '{"command":"use","pack":null}'
-mk -j '{"command":"use","model":"openai:gpt-5.2"}'
+mk -j '{"command":"use","model":"openai:gpt-5.4"}'
 mk -j '{"command":"list"}'
 mk -j '{"command":"doctor"}'
 ```

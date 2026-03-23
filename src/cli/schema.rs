@@ -254,7 +254,7 @@ pub fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                 "description": "Omit both pack and model to show defaults for both. Use null for pack or model to show only that field; use a string to set. Shell: only mk use pack <name> and mk use model <id> (set).",
                 "properties": {
                     "pack": {"description": "null = show default pack; string = set default pack by name or path"},
-                    "model": {"description": "null = show default model; string = set (e.g. openai:gpt-5.2)"}
+                    "model": {"description": "null = show default model; string = set (e.g. openai:gpt-5.4)"}
                 }
             }
         }),
@@ -419,7 +419,7 @@ fn input_json_schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "pack": { "description": "null = show default pack; string = set" },
-                    "model": { "description": "null = show default model; string = set (e.g. openai:gpt-5.2)" }
+                    "model": { "description": "null = show default model; string = set (e.g. openai:gpt-5.4)" }
                 }
             }),
             vec![

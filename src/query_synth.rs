@@ -30,6 +30,11 @@ fn synthesis_max_tokens() -> usize {
         .unwrap_or(512)
 }
 
+/// Some chat models (e.g. `gpt-5.*`) return 400 if the body uses `max_tokens`; they require `max_completion_tokens`.
+fn chat_completion_uses_max_completion_tokens(model: &str) -> bool {
+    model.starts_with("gpt-5") || model.starts_with("o1") || model.starts_with("o3")
+}
+
 pub async fn synthesize_answer_async(
     query: &str,
     response: &QueryResponse,
@@ -91,15 +96,24 @@ async fn openai_completion_async(
     model: &str,
     api_key: &str,
 ) -> Result<String> {
+    let use_max_completion_tokens = chat_completion_uses_max_completion_tokens(model);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .context("build reqwest client for OpenAI")?;
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": user_message}],
-        "max_tokens": max_tokens
-    });
+    let body = if use_max_completion_tokens {
+        serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": user_message}],
+            "max_completion_tokens": max_tokens
+        })
+    } else {
+        serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": user_message}],
+            "max_tokens": max_tokens
+        })
+    };
     let res = client
         .post("https://api.openai.com/v1/chat/completions")
         .header("Authorization", format!("Bearer {}", api_key))

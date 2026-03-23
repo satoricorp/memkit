@@ -67,13 +67,13 @@ cargo build --release
 
 Fields:
 
-- `model` (optional) — Default model ID for `mk use model <id>` (namespaced, e.g. `openai:gpt-5.2`). When it starts with `openai:`, the server may use it for query synthesis (see precedence below).
+- `model` (optional) — Default model ID for `mk use model <id>` (namespaced, e.g. `openai:gpt-5.4`). When it starts with `openai:`, the server may use it for query synthesis (see precedence below).
 
 **Query synthesis (OpenAI)** — order of precedence for which model the API calls:
 
-1. `MEMKIT_OPENAI_MODEL` (raw OpenAI model id, e.g. `gpt-5.2`)
+1. `MEMKIT_OPENAI_MODEL` (raw OpenAI model id, e.g. `gpt-5.4`)
 2. `memkit.json` `model` if it is an `openai:*` id
-3. Built-in default `gpt-5.2`
+3. Built-in default `gpt-5.4`
 
 Full detail: [docs/llm-configuration.md](docs/llm-configuration.md).
 

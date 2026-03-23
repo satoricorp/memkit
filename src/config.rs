@@ -80,6 +80,7 @@ pub fn supported_models() -> Vec<(&'static str, &'static str)> {
         ("embed:qwen2.5-2b-instruct", "Qwen 2.5 2B Instruct (local GGUF)"),
         ("embed:tinyllama-1.1b-chat", "TinyLlama 1.1B Chat (local GGUF)"),
         // openai
+        ("openai:gpt-5.4", "OpenAI GPT-5.4"),
         ("openai:gpt-5.2", "OpenAI GPT-5.2"),
         ("openai:gpt-4o-mini", "OpenAI GPT-4o mini"),
         ("openai:gpt-4o", "OpenAI GPT-4o"),
@@ -100,7 +101,7 @@ pub fn is_supported_model(id: &str) -> bool {
 }
 
 /// Default OpenAI chat model for query synthesis (raw API id for `chat/completions`).
-pub const DEFAULT_OPENAI_SYNTHESIS_MODEL: &str = "gpt-5.2";
+pub const DEFAULT_OPENAI_SYNTHESIS_MODEL: &str = "gpt-5.4";
 
 /// Strip `openai:` namespace from memkit.json model ids for the OpenAI HTTP API.
 pub fn openai_api_model_id(namespaced_or_plain: &str) -> String {
