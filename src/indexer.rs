@@ -19,6 +19,9 @@ use crate::pack::{
 use crate::types::{FileState, SourceConfig, SourceDoc};
 
 fn is_indexable_file(path: &Path) -> bool {
+    if path.file_name().and_then(|n| n.to_str()) == Some(".DS_Store") {
+        return false;
+    }
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -100,13 +103,17 @@ fn to_source_configs(pack_dir: &Path, sources: &[PathBuf]) -> Vec<SourceConfig> 
             SourceConfig {
                 root_path,
                 include: vec!["**/*".to_string()],
-                exclude: vec!["**/.git/**".to_string(), "**/target/**".to_string()],
+                exclude: vec![
+                    "**/.git/**".to_string(),
+                    "**/target/**".to_string(),
+                    "**/.DS_Store".to_string(),
+                ],
             }
         })
         .collect()
 }
 
-pub fn run_index(pack_dir: &Path, sources: &[PathBuf]) -> Result<(usize, usize, usize)> {
+pub fn run_index(pack_dir: &Path, sources: &[PathBuf]) -> Result<(usize, usize, usize, Vec<String>)> {
     let mut manifest = load_manifest(pack_dir)?;
     manifest.sources = to_source_configs(pack_dir, sources);
     let existing_docs: Vec<_> =
@@ -124,6 +131,7 @@ pub fn run_index(pack_dir: &Path, sources: &[PathBuf]) -> Result<(usize, usize, 
     let mut scanned = 0usize;
     let mut updated_files = 0usize;
     let mut total_chunks = 0usize;
+    let mut index_warnings: Vec<String> = Vec::new();
     let mut next_docs = Vec::new();
     let mut next_states = Vec::new();
     let mut seen_paths = HashSet::new();
@@ -161,12 +169,32 @@ pub fn run_index(pack_dir: &Path, sources: &[PathBuf]) -> Result<(usize, usize, 
             if !is_indexable_file(path) {
                 continue;
             }
+            let file_path = path.to_string_lossy().to_string();
             let Some(content) = crate::extract::extract_text(path) else {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_ascii_lowercase());
+                let likely_binary_issue = matches!(
+                    ext.as_deref(),
+                    Some("pdf" | "doc" | "docx" | "xls" | "xlsx" | "xlsb")
+                );
+                let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                if likely_binary_issue || (is_indexable_file(path) && size > 0) {
+                    if index_warnings.len() < 200 {
+                        let detail = match ext.as_deref() {
+                            Some("pdf") => "skipped (PDF: unreadable, encrypted, invalid stream, or empty—pdf-extract often fails on bad streams)",
+                            Some("doc" | "docx" | "xls" | "xlsx" | "xlsb") => {
+                                "skipped (office file could not be read or is empty)"
+                            }
+                            _ => "skipped (no text extracted)",
+                        };
+                        index_warnings.push(format!("{}: {}", file_path, detail));
+                    }
+                }
                 continue;
             };
             scanned += 1;
-
-            let file_path = path.to_string_lossy().to_string();
             seen_paths.insert(file_path.clone());
 
             let relative_path = path
@@ -287,7 +315,25 @@ pub fn run_index(pack_dir: &Path, sources: &[PathBuf]) -> Result<(usize, usize, 
         {
             crate::term::warn(format!("warning: failed writing entities/edges to helix: {}", e));
         }
-        if let Err(e) = helix_write_graph_stats(pack_dir, entity_map.len(), all_relations.len()) {
+        let unique_source_paths: Vec<String> = {
+            let mut v: Vec<String> = next_docs.iter().map(|d| d.source_path.clone()).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let relationship_count_unique = all_relations
+            .iter()
+            .map(|r| (r.source.clone(), r.relation.clone(), r.target.clone()))
+            .collect::<HashSet<_>>()
+            .len();
+        if let Err(e) = helix_write_graph_stats(
+            pack_dir,
+            entity_map.len(),
+            relationship_count_unique,
+            total_chunks,
+            &unique_source_paths,
+            &index_warnings,
+        ) {
             crate::term::warn(format!("warning: failed writing graph stats: {}", e));
         }
 
@@ -319,5 +365,5 @@ pub fn run_index(pack_dir: &Path, sources: &[PathBuf]) -> Result<(usize, usize, 
     manifest.updated_at = Utc::now();
     save_manifest(pack_dir, manifest).context("failed to update manifest timestamp")?;
 
-    Ok((scanned, updated_files, total_chunks))
+    Ok((scanned, updated_files, total_chunks, index_warnings))
 }

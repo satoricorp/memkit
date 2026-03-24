@@ -21,7 +21,8 @@ use crate::google::{
 use crate::indexer::run_index;
 use crate::file_tree::format_file_tree;
 use crate::helix_store::{
-    helix_load_all_docs, helix_graph_counts, helix_pack_path_for_local, remove_helix_for_pack,
+    helix_graph_counts, helix_load_all_docs, helix_pack_path_for_local, helix_read_index_warnings,
+    helix_try_cached_index_status, remove_helix_for_pack,
 };
 use crate::pack::{
     add_source_root, copy_dir_into_sources, has_manifest_at, init_pack, load_manifest,
@@ -217,24 +218,50 @@ async fn status(
     State(state): State<AppState>,
     Query(q): Query<StatusQuery>,
 ) -> Json<Value> {
-    let (pack_str, sources, vector_count, indexed, file_paths, pack_for_helix) =
-        if let Some(ref path) = q.path {
+    let (
+        pack_str,
+        sources,
+        vector_count,
+        indexed,
+        file_paths,
+        pack_for_helix,
+        source_root_paths,
+        index_warnings,
+    ) = if let Some(ref path) = q.path {
             // Resolve as pack name (registry) first, then as filesystem path.
             match resolve_pack_by_name_or_path(path) {
                 Ok(pack_root) => {
                     // If path was already the pack dir (manifest.json here), use it; else pack_root is parent of .memkit.
                     let pack_dir = resolve_pack_dir(&pack_root);
                     let manifest = load_manifest(&pack_dir).ok();
-                    let docs = manifest
+                    let sources = manifest.as_ref().map(|m| m.sources.clone()).unwrap_or_default();
+                    let source_root_paths: Vec<String> = manifest
                         .as_ref()
-                        .and_then(|m| load_pack_docs(&pack_dir, m.embedding.dimension).ok())
+                        .map(|m| {
+                            resolve_source_roots(&pack_dir, m)
+                                .into_iter()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .collect()
+                        })
                         .unwrap_or_default();
-                    let mut file_paths: Vec<String> = docs.iter().map(|d| d.source_path.clone()).collect();
-                    file_paths.sort_unstable();
-                    file_paths.dedup();
-                    let sources = manifest.map(|m| m.sources).unwrap_or_default();
-                    let vector_count = docs.len();
-                    let indexed = vector_count > 0;
+                    let (vector_count, file_paths, indexed, index_warnings) =
+                        if let Some((vc, mut fp, w)) = helix_try_cached_index_status(&pack_dir) {
+                            fp.sort_unstable();
+                            fp.dedup();
+                            (vc, fp, vc > 0, w)
+                        } else {
+                            let docs = manifest
+                                .as_ref()
+                                .and_then(|m| load_pack_docs(&pack_dir, m.embedding.dimension).ok())
+                                .unwrap_or_default();
+                            let mut fp: Vec<String> =
+                                docs.iter().map(|d| d.source_path.clone()).collect();
+                            fp.sort_unstable();
+                            fp.dedup();
+                            let n = docs.len();
+                            let iw = helix_read_index_warnings(&pack_dir);
+                            (n, fp, n > 0, iw)
+                        };
                     let display = if dirs::home_dir().as_ref().and_then(|h| h.canonicalize().ok()).as_ref()
                         == pack_root.canonicalize().as_ref().ok()
                     {
@@ -249,6 +276,8 @@ async fn status(
                         indexed,
                         file_paths,
                         Some(pack_dir),
+                        source_root_paths,
+                        index_warnings,
                     )
                 }
                 Err(_) => {
@@ -257,16 +286,34 @@ async fn status(
                         .unwrap_or_else(|_| PathBuf::from(path));
                     let pack = resolve_pack_dir(&dir);
                     let manifest = load_manifest(&pack).ok();
-                    let docs = manifest
+                    let sources = manifest.as_ref().map(|m| m.sources.clone()).unwrap_or_default();
+                    let source_root_paths: Vec<String> = manifest
                         .as_ref()
-                        .and_then(|m| load_pack_docs(&pack, m.embedding.dimension).ok())
+                        .map(|m| {
+                            resolve_source_roots(&pack, m)
+                                .into_iter()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .collect()
+                        })
                         .unwrap_or_default();
-                    let vector_count = docs.len();
-                    let indexed = vector_count > 0;
-                    let mut file_paths: Vec<String> = docs.iter().map(|d| d.source_path.clone()).collect();
-                    file_paths.sort_unstable();
-                    file_paths.dedup();
-                    let sources = manifest.map(|m| m.sources).unwrap_or_default();
+                    let (vector_count, file_paths, indexed, index_warnings) =
+                        if let Some((vc, mut fp, w)) = helix_try_cached_index_status(&pack) {
+                            fp.sort_unstable();
+                            fp.dedup();
+                            (vc, fp, vc > 0, w)
+                        } else {
+                            let docs = manifest
+                                .as_ref()
+                                .and_then(|m| load_pack_docs(&pack, m.embedding.dimension).ok())
+                                .unwrap_or_default();
+                            let mut fp: Vec<String> =
+                                docs.iter().map(|d| d.source_path.clone()).collect();
+                            fp.sort_unstable();
+                            fp.dedup();
+                            let n = docs.len();
+                            let iw = helix_read_index_warnings(&pack);
+                            (n, fp, n > 0, iw)
+                        };
                     (
                         pack.display().to_string(),
                         sources,
@@ -274,6 +321,8 @@ async fn status(
                         indexed,
                         file_paths,
                         Some(pack),
+                        source_root_paths,
+                        index_warnings,
                     )
                 }
             }
@@ -286,7 +335,10 @@ async fn status(
                 if let Ok(m) = load_manifest(&pack_dir) {
                     all_sources.extend(m.sources);
                 }
-                if let Ok(m) = load_manifest(&pack_dir) {
+                if let Some((n, paths, _)) = helix_try_cached_index_status(&pack_dir) {
+                    total_vectors += n;
+                    all_paths.extend(paths);
+                } else if let Ok(m) = load_manifest(&pack_dir) {
                     if let Ok(docs) = load_pack_docs(&pack_dir, m.embedding.dimension) {
                         total_vectors += docs.len();
                         all_paths.extend(docs.iter().map(|d| d.source_path.clone()));
@@ -316,6 +368,8 @@ async fn status(
                 total_vectors > 0,
                 all_paths,
                 pack_for_helix,
+                Vec::<String>::new(),
+                Vec::<String>::new(),
             )
         };
 
@@ -472,6 +526,8 @@ async fn status(
         "relationships": relationships,
         "file_tree": file_tree,
         "sources": sources,
+        "source_root_paths": source_root_paths,
+        "index_warnings": index_warnings,
         "pending_removal": pending_removal,
         "pending_add": pending_add,
         "pack_indexing_busy": pack_indexing_busy,
@@ -1035,12 +1091,13 @@ fn start_next_job_if_idle(state: AppState) {
                     ensure_registered(&normalized, name, is_first)?;
                     let manifest = load_manifest(&pack_dir)?;
                     let sources = resolve_source_roots(&pack_dir, &manifest);
-                    let (scanned, updated, chunks) =
+                    let (scanned, updated, chunks, warnings) =
                         run_index(&pack_dir, &sources)?;
                     Ok(json!({
                         "scanned": scanned,
                         "updated_files": updated,
-                        "chunks": chunks
+                        "chunks": chunks,
+                        "warnings": warnings
                     }))
                 })
                 .await;
@@ -1055,20 +1112,23 @@ fn start_next_job_if_idle(state: AppState) {
                     let mut total_scanned = 0usize;
                     let mut total_updated = 0usize;
                     let mut total_chunks = 0usize;
+                    let mut all_warnings: Vec<String> = Vec::new();
                     let _multi = packs_to_index.len() > 1;
                     for pack in &packs_to_index {
                         let manifest = load_manifest(pack)?;
                         let sources = resolve_source_roots(pack, &manifest);
-                        let (scanned, updated, chunks) =
+                        let (scanned, updated, chunks, warnings) =
                             run_index(pack, &sources)?;
                         total_scanned += scanned;
                         total_updated += updated;
                         total_chunks += chunks;
+                        all_warnings.extend(warnings);
                     }
                     Ok(json!({
                         "scanned": total_scanned,
                         "updated_files": total_updated,
-                        "chunks": total_chunks
+                        "chunks": total_chunks,
+                        "warnings": all_warnings
                     }))
                 })
                 .await;

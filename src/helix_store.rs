@@ -3,8 +3,10 @@
 //! Chunks are stored as vectors; entities as nodes and relationships as edges in the same Helix DB.
 //! Entity/relationship counts are also persisted in graph_stats.json for status.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "helix")]
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -14,6 +16,19 @@ use crate::types::{GraphRelation, QueryHit, SourceDoc};
 const CHUNK_LABEL: &str = "chunk";
 const ENTITY_LABEL: &str = "Entity";
 const ENTITY_IDS_FILE: &str = "entity_ids.json";
+
+/// LMDB only allows one open `Env` per on-disk path per process. Serialize all Helix opens
+/// (index, query, entity writes, remove) so concurrent handlers never hit `Env already open`.
+#[cfg(feature = "helix")]
+static HELIX_STORE_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(feature = "helix")]
+fn helix_store_guard() -> std::sync::MutexGuard<'static, ()> {
+    HELIX_STORE_MUTEX
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
 
 /// Base directory for all Helix pack DBs. From env MEMKIT_HELIX_ROOT or default ~/.memkit/helix.
 pub fn helix_base_dir() -> PathBuf {
@@ -49,6 +64,7 @@ pub fn helix_pack_path_for_local(pack_dir: &Path) -> PathBuf {
 /// stores helix (under the .memkit pack path).
 #[cfg(feature = "helix")]
 pub fn remove_helix_for_pack(pack_root: &Path) -> Result<()> {
+    let _guard = helix_store_guard();
     use std::fs;
     for candidate in [pack_root.to_path_buf(), pack_root.join(".memkit")] {
         let path = helix_pack_path_for_local(&candidate);
@@ -162,6 +178,7 @@ fn insert_docs_into_storage(
 pub fn helix_rebuild_chunks(path: &Path, docs: &[SourceDoc], _embedding_dim: usize) -> Result<()> {
     #[cfg(feature = "helix")]
     {
+        let _guard = helix_store_guard();
         if path.exists() {
             std::fs::remove_dir_all(path).context("remove existing helix dir")?;
         }
@@ -181,6 +198,7 @@ pub fn helix_rebuild_chunks(path: &Path, docs: &[SourceDoc], _embedding_dim: usi
 pub fn helix_append_chunks(path: &Path, docs: &[SourceDoc], _embedding_dim: usize) -> Result<()> {
     #[cfg(feature = "helix")]
     {
+        let _guard = helix_store_guard();
         if docs.is_empty() {
             return Ok(());
         }
@@ -252,6 +270,7 @@ fn hvector_to_source_doc(
 pub fn helix_load_all_docs(path: &Path, _dim: usize) -> Result<Vec<SourceDoc>> {
     #[cfg(feature = "helix")]
     {
+        let _guard = helix_store_guard();
         use helix_db::helix_engine::traversal_core::ops::g::G;
         use helix_db::helix_engine::traversal_core::ops::source::v_from_type::VFromTypeAdapter;
         use helix_db::helix_engine::traversal_core::traversal_value::TraversalValue;
@@ -297,6 +316,7 @@ pub fn helix_hybrid_query(
 ) -> Result<Vec<QueryHit>> {
     #[cfg(feature = "helix")]
     {
+        let _guard = helix_store_guard();
         use helix_db::helix_engine::traversal_core::ops::g::G;
         use helix_db::helix_engine::traversal_core::ops::vectors::search::SearchVAdapter;
         use helix_db::helix_engine::traversal_core::traversal_value::TraversalValue;
@@ -358,15 +378,115 @@ pub fn helix_hybrid_query(
 
 const GRAPH_STATS_FILE: &str = "graph_stats.json";
 
-/// Write entity and relationship counts for the pack (used at index time for store-helix-only).
-pub fn helix_write_graph_stats(pack_dir: &Path, entity_count: usize, relationship_count: usize) -> Result<()> {
+/// Write entity/relationship counts plus chunk count and source paths so `/status` can avoid opening Helix.
+pub fn helix_write_graph_stats(
+    pack_dir: &Path,
+    entity_count: usize,
+    relationship_count: usize,
+    chunk_count: usize,
+    source_paths: &[String],
+    index_warnings: &[String],
+) -> Result<()> {
     let path = pack_dir.join(GRAPH_STATS_FILE);
     let json = serde_json::json!({
         "entities": entity_count,
         "relationships": relationship_count,
+        "chunks": chunk_count,
+        "source_paths": source_paths,
+        "index_warnings": index_warnings,
     });
     std::fs::write(&path, serde_json::to_string_pretty(&json)?).context("write graph_stats.json")?;
     Ok(())
+}
+
+/// When `graph_stats.json` includes `chunks` (written by the indexer), status can use this instead of loading all vectors.
+#[cfg(feature = "helix")]
+pub fn helix_try_cached_index_status(pack_dir: &Path) -> Option<(usize, Vec<String>, Vec<String>)> {
+    let path = pack_dir.join(GRAPH_STATS_FILE);
+    let data = std::fs::read_to_string(&path).ok()?;
+    let obj: serde_json::Value = serde_json::from_str(&data).ok()?;
+    let chunks = obj.get("chunks")?.as_u64()? as usize;
+    let paths: Vec<String> = obj
+        .get("source_paths")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let warnings: Vec<String> = obj
+        .get("index_warnings")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((chunks, paths, warnings))
+}
+
+#[cfg(not(feature = "helix"))]
+pub fn helix_try_cached_index_status(_pack_dir: &Path) -> Option<(usize, Vec<String>, Vec<String>)> {
+    None
+}
+
+/// Last index warnings from `graph_stats.json` (when cache path is not used).
+#[cfg(feature = "helix")]
+pub fn helix_read_index_warnings(pack_dir: &Path) -> Vec<String> {
+    let path = pack_dir.join(GRAPH_STATS_FILE);
+    let Some(data) = std::fs::read_to_string(&path).ok() else {
+        return Vec::new();
+    };
+    let Some(obj) = serde_json::from_str::<serde_json::Value>(&data).ok() else {
+        return Vec::new();
+    };
+    obj.get("index_warnings")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(not(feature = "helix"))]
+pub fn helix_read_index_warnings(_pack_dir: &Path) -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(feature = "helix")]
+pub fn helix_graph_chunk_count(pack_dir: &Path) -> Option<usize> {
+    let path = pack_dir.join(GRAPH_STATS_FILE);
+    let data = std::fs::read_to_string(&path).ok()?;
+    let obj: serde_json::Value = serde_json::from_str(&data).ok()?;
+    obj.get("chunks").and_then(|v| v.as_u64()).map(|v| v as usize)
+}
+
+#[cfg(not(feature = "helix"))]
+pub fn helix_graph_chunk_count(_pack_dir: &Path) -> Option<usize> {
+    None
+}
+
+#[cfg(feature = "helix")]
+pub fn helix_graph_source_paths(pack_dir: &Path) -> Option<Vec<String>> {
+    let path = pack_dir.join(GRAPH_STATS_FILE);
+    let data = std::fs::read_to_string(&path).ok()?;
+    let obj: serde_json::Value = serde_json::from_str(&data).ok()?;
+    obj.get("source_paths")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+}
+
+#[cfg(not(feature = "helix"))]
+pub fn helix_graph_source_paths(_pack_dir: &Path) -> Option<Vec<String>> {
+    None
 }
 
 /// Read entity and relationship counts from the pack's graph_stats.json. Returns (0, 0) if missing or invalid.
@@ -467,14 +587,29 @@ fn insert_entities_and_edges<'a>(
         }
     }
 
+    let mut seen_rel: HashSet<(String, String, String)> = HashSet::new();
     for rel in relations {
+        if !seen_rel.insert((
+            rel.source.clone(),
+            rel.relation.clone(),
+            rel.target.clone(),
+        )) {
+            continue;
+        }
         let Some(&from_id) = entity_map.get(&rel.source) else { continue };
         let Some(&to_id) = entity_map.get(&rel.target) else { continue };
         let label = arena.alloc_str(rel.relation.as_str());
-        G::new_mut(storage, arena, txn)
+        let edge_res = G::new_mut(storage, arena, txn)
             .add_edge(label, None, from_id, to_id, false, false)
-            .collect_to_obj()
-            .map_err(|e| anyhow::anyhow!("helix add_edge: {:?}", e))?;
+            .collect_to_obj();
+        if let Err(e) = edge_res {
+            let msg = format!("{e:?}");
+            // add_docs appends to an existing graph; edges may already exist from a prior run.
+            if msg.contains("KEYEXIST") || msg.contains("MDB_KEYEXIST") {
+                continue;
+            }
+            return Err(anyhow::anyhow!("helix add_edge: {:?}", e));
+        }
     }
     Ok(())
 }
@@ -489,6 +624,7 @@ pub fn helix_write_entities_edges(
 ) -> Result<()> {
     #[cfg(feature = "helix")]
     {
+        let _guard = helix_store_guard();
         let storage = open_helix_storage(path)?;
         let mut txn = storage
             .graph_env

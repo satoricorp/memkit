@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 use crate::embed::provider_from_name;
 use crate::indexer::{chunk_text, content_hash};
 use crate::helix_store::{
-    helix_append_chunks, helix_load_entity_id_map, helix_pack_path_for_local, helix_rebuild_chunks,
+    helix_append_chunks, helix_graph_chunk_count, helix_graph_source_paths,
+    helix_load_entity_id_map, helix_pack_path_for_local, helix_rebuild_chunks,
     helix_write_entities_edges, helix_write_graph_stats,
 };
 use crate::ontology::OntologyEngine;
@@ -107,10 +108,21 @@ pub fn run_add(
         let mut entity_map = helix_load_entity_id_map(pack_dir);
         helix_write_entities_edges(&path, pack_dir, &mut entity_map, &all_entities, &all_relations)
             .context("failed to write entities/edges to helix")?;
+        let prev_chunks = helix_graph_chunk_count(pack_dir).unwrap_or(0);
+        let total_chunks = prev_chunks + new_docs.len();
+        let mut merged_paths = helix_graph_source_paths(pack_dir).unwrap_or_default();
+        for d in &new_docs {
+            merged_paths.push(d.source_path.clone());
+        }
+        merged_paths.sort_unstable();
+        merged_paths.dedup();
         helix_write_graph_stats(
             pack_dir,
             entity_map.len(),
             existing_rels + all_relations.len(),
+            total_chunks,
+            &merged_paths,
+            &[],
         )?;
         let _ = ontology.save();
 

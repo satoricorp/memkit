@@ -1,7 +1,25 @@
 use std::fs;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
+use std::sync::Mutex;
 
 use litchi::sheet::CellValue;
+
+/// Serialize pdf-extract panic-hook swaps (Rust still runs the default hook before catch_unwind otherwise).
+static PDF_EXTRACT_HOOK: Mutex<()> = Mutex::new(());
+
+/// Always restores the previous panic hook (even if `catch_unwind` or the library misbehaves).
+struct PanicHookGuard {
+    prev: Option<Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>>,
+}
+
+impl Drop for PanicHookGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            std::panic::set_hook(prev);
+        }
+    }
+}
 
 /// Returns true if the extension is an Office format we extract with litchi.
 pub fn is_office_extension(ext: &str) -> bool {
@@ -31,7 +49,27 @@ pub fn extract_text(path: &Path) -> Option<String> {
 
 fn extract_pdf(path: &Path) -> Option<String> {
     let bytes = fs::read(path).ok()?;
-    pdf_extract::extract_text_from_mem(&bytes).ok()
+    // pdf-extract may panic on malformed PDFs (e.g. InvalidContentStream) instead of returning Err.
+    let _lock = PDF_EXTRACT_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let _hook_guard = PanicHookGuard { prev: Some(prev) };
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        pdf_extract::extract_text_from_mem(&bytes)
+    }));
+    match result {
+        Ok(Ok(text)) => Some(text),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            crate::term::warn(format!(
+                "skipping PDF (parse panicked or invalid stream): {}",
+                path.display()
+            ));
+            None
+        }
+    }
 }
 
 fn extract_plain_text(path: &Path, ext: &str) -> Option<String> {
