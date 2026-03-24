@@ -87,7 +87,10 @@ use owo_colors::OwoColorize;
 use crate::cli::types::{CliCommand, ServeConfig, UseField, UseSpec};
 use crate::cli_client::{QueryArgs, ServerConfig};
 use crate::pack::{has_manifest_at, init_pack};
-use crate::registry::{ensure_registered, load_registry, pack_dir_for_path, resolve_pack_by_name_or_path, set_default};
+use crate::registry::{
+    ensure_registered, load_registry, pack_dir_for_path, resolve_pack_by_name_or_path,
+    resolve_remove_pack_target, set_default,
+};
 use crate::server::run_server;
 
 /// Wrap a single line at `width` chars; newlines in `s` are collapsed to space. Truncate to `max_chars` first.
@@ -1057,15 +1060,7 @@ async fn run() -> Result<()> {
             let port = port
                 .or_else(|| env::var("API_PORT").ok().and_then(|v| v.parse::<u16>().ok()))
                 .unwrap_or(4242);
-            let output = std::process::Command::new("lsof")
-                .args(["-ti", &format!(":{}", port)])
-                .output()
-                .context("lsof failed")?;
-            if output.status.success() && !output.stdout.is_empty() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for pid in stdout.trim().split_whitespace() {
-                    let _ = std::process::Command::new("kill").arg(pid).status();
-                }
+            if cli_client::stop_server_on_port(port)? {
                 println!(
                     "{}",
                     crate::term::style_stdout("Server stopped.", |s| s.green().to_string())
@@ -1084,14 +1079,7 @@ async fn run() -> Result<()> {
 
             match &cmd {
                 CliCommand::Remove { dir, yes } => {
-                    let target = if let Some(name_or_path) = dir.as_deref() {
-                        resolve_pack_by_name_or_path(name_or_path)?
-                    } else {
-                        std::env::current_dir()
-                            .unwrap_or_else(|_| PathBuf::from("."))
-                            .canonicalize()
-                            .with_context(|| "path not found: current directory")?
-                    };
+                    let target = resolve_remove_pack_target(dir.as_deref())?;
                     if ctx.dry_run {
                         let out = serde_json::json!({
                             "dry_run": true,
@@ -1140,7 +1128,13 @@ async fn run() -> Result<()> {
                     .await;
             }
             if commands_need_server {
-                cli_client::ensure_server(&cfg).await?;
+                let readonly_no_autostart =
+                    matches!(&cmd, CliCommand::Status { .. } | CliCommand::List);
+                if readonly_no_autostart {
+                    cli_client::require_server_running(&cfg).await?;
+                } else {
+                    cli_client::ensure_server(&cfg).await?;
+                }
                 cli_client::print_server_note_running(&cfg, ctx.output_format == OutputFormat::Json);
             }
 
@@ -1150,14 +1144,7 @@ async fn run() -> Result<()> {
             }
             let result: Result<CommandOut> = match cmd {
                 CliCommand::Remove { dir, yes: _ } => {
-                    let target = if let Some(name_or_path) = dir.as_deref() {
-                        resolve_pack_by_name_or_path(name_or_path)?
-                    } else {
-                        std::env::current_dir()
-                            .unwrap_or_else(|_| PathBuf::from("."))
-                            .canonicalize()
-                            .with_context(|| "path not found: current directory")?
-                    };
+                    let target = resolve_remove_pack_target(dir.as_deref())?;
                     let path_str = target.display().to_string();
                     let out = cli_client::remove(&cfg, &path_str).await?;
                     if ctx.output_format != OutputFormat::Json {
@@ -1226,7 +1213,7 @@ async fn run() -> Result<()> {
                             if pack.is_some() {
                                 body["pack"] = serde_json::json!(pack_root.to_string_lossy().to_string());
                             }
-                            let out = cli_client::add(&cfg, &body).await?;
+                            let mut out = cli_client::add(&cfg, &body).await?;
                             if ctx.output_format != OutputFormat::Json {
                                 if let Some(job_id) = out.get("job").and_then(|j| j.get("id")).and_then(serde_json::Value::as_str) {
                                     println!(
@@ -1239,10 +1226,11 @@ async fn run() -> Result<()> {
                             if out.get("job").is_some() && !ctx.dry_run {
                                 let pack_path = pack_root.to_string_lossy().to_string();
                                 cli_client::poll_until_index_done(&cfg, &pack_path).await?;
+                                let data = cli_client::status(&cfg, Some(&pack_path)).await?;
                                 if ctx.output_format != OutputFormat::Json {
-                                    let data = cli_client::status(&cfg, Some(&pack_path)).await?;
                                     cli_client::print_status(&data);
                                 }
+                                cli_client::merge_job_into_add_output_after_poll(&mut out, &data);
                             }
                             Ok(CommandOut::Output(out))
                         }
