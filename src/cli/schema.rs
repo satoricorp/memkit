@@ -177,7 +177,7 @@ pub fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
             "input": {
                 "type": "object",
                 "properties": {
-                    "dir": {"type": "string", "description": "Directory to remove pack from (optional)"},
+                    "dir": {"type": "string", "description": "Pack name or path (optional). Omit to remove the registry default pack (same as the (default) line in `mk status`). To remove the pack at the current directory, pass `.` or an explicit path."},
                     "confirm": {"type": "boolean", "default": false, "description": "Same as argv --yes / -y; skip TTY prompt"}
                 }
             }
