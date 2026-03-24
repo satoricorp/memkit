@@ -56,6 +56,30 @@ fn pack_list_paren_label(p: &RegistryPack, reg: &Registry, home_canon: &Option<P
     }
 }
 
+/// Inner text for `[…]` in server banner (name, `default`, or directory name).
+fn pack_bracket_inner(p: &RegistryPack, reg: &Registry, home_canon: &Option<PathBuf>) -> String {
+    if let Some(ref n) = p.name {
+        return n.clone();
+    }
+    let path_is_home = PathBuf::from(&p.path)
+        .canonicalize()
+        .ok()
+        .as_ref()
+        == home_canon.as_ref();
+    let is_default_pack = p.default
+        || reg.default_path.as_deref() == Some(p.path.as_str())
+        || reg.packs.len() == 1
+        || (path_is_home && reg.default_path.is_none());
+    if is_default_pack {
+        return "default".to_string();
+    }
+    PathBuf::from(&p.path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "pack".to_string())
+}
+
 fn bracket_local_cloud(c: bool, local_on: bool, cloud_on: bool) -> String {
     let local = if local_on {
         term::cyan_words(c, "[local]")
@@ -285,17 +309,41 @@ pub async fn ensure_server(cfg: &ServerConfig) -> Result<()> {
     wait_for_server_ready(cfg).await
 }
 
-/// One-line hint on stderr: server live + port (after a successful `ensure_server`).
+/// Two-line hint on stderr: server + default pack (after a successful `ensure_server`).
 pub fn print_server_note_running(cfg: &ServerConfig, output_json: bool) {
     if output_json {
         return;
     }
     let c = term::color_stderr();
-    eprintln!(
-        "{} {}",
-        "Server is live",
-        term::bracketed_cyan(c, &format!(":{}", cfg.port))
-    );
+    let bullet = "⏺";
+    let server_lbl = term::success_words(c, "Server");
+    let port_lbl = term::dimmed_word(c, &format!(":{}", cfg.port));
+    eprintln!("{} {} {}", bullet, server_lbl, port_lbl);
+
+    let _ = crate::registry::ensure_default_if_unset();
+    let reg = crate::registry::load_registry().unwrap_or_default();
+    let home_canon = dirs::home_dir().and_then(|h| h.canonicalize().ok());
+    let pack = reg
+        .default_path
+        .as_ref()
+        .and_then(|dp| reg.packs.iter().find(|p| p.path == *dp))
+        .or_else(|| reg.packs.iter().find(|p| p.default))
+        .or_else(|| reg.packs.first());
+
+    if let Some(p) = pack {
+        let inner = pack_bracket_inner(p, &reg, &home_canon);
+        let bracketed = format!("[{}]", inner);
+        let bracket_styled = term::cyan_words(c, &bracketed);
+        let path_disp = pack_path_display(p, &home_canon);
+        let path_styled = term::dimmed_word(c, &path_disp);
+        eprintln!("{} Pack {} {}", bullet, bracket_styled, path_styled);
+    } else {
+        eprintln!(
+            "{} Pack {}",
+            bullet,
+            term::dimmed_word(c, "(no pack registered)")
+        );
+    }
 }
 
 /// One-line hint on stderr for `mk doctor`: port status if up, else how to start `mk start`.
