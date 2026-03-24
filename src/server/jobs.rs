@@ -6,9 +6,6 @@ use serde_json::Value;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum JobType {
     IndexSources,
-    /// New pack: copy dir into sources, register, then run index. Job stays active for entire flow.
-    IndexNewPack,
-    AddDocuments,
     RemovePack,
 }
 
@@ -32,9 +29,6 @@ pub(crate) struct JobRecord {
     /// (temp_path_to_remove, pack_path) for iCloud: remove source root and delete temp after index
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cleanup_after_index: Option<(String, String)>,
-    /// For AddDocuments: { "pack_path": string, "items": [ { "content": string, "source_path": string } ] }
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub add_payload: Option<Value>,
     /// Directory or source roots being indexed in this job (for CLI status).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing_sources: Option<Vec<String>>,

@@ -87,7 +87,9 @@ impl OntologyProviderKind {
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
     pub provider: OntologyProviderKind,
+    #[cfg_attr(not(feature = "llama-embedded"), allow(dead_code))]
     pub model: String,
+    #[cfg_attr(not(feature = "llama-embedded"), allow(dead_code))]
     pub max_tokens: usize,
     #[cfg_attr(not(feature = "llama-embedded"), allow(dead_code))]
     pub timeout_ms: u64,

@@ -6,7 +6,6 @@ mod config;
 mod helix_store;
 mod extract;
 mod file_tree;
-mod memkit_txt;
 mod registry;
 mod validate;
 mod embed;
@@ -845,11 +844,7 @@ fn print_help_section(c: bool, title: &str, first: bool) {
 
 fn print_help() {
     let c = crate::term::color_stdout();
-    println!("{}", crate::term::title_app(c));
-    println!(
-        "{}",
-        crate::term::dimmed_word(c, &format!("version {}", crate::term::PKG_VERSION))
-    );
+    crate::term::print_help_title(c);
     println!();
     println!(
         "  {}",

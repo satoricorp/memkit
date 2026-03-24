@@ -147,10 +147,6 @@ fn insert_docs_into_storage(
     use helix_db::helix_engine::vector_core::vector::HVector;
     use heed3::RoTxn;
 
-    fn no_filter(_: &HVector, _: &RoTxn) -> bool {
-        true
-    }
-
     let mut txn = storage
         .graph_env
         .write_txn()
@@ -646,8 +642,6 @@ pub fn helix_write_entities_edges(
 
 #[cfg(all(test, feature = "helix"))]
 mod helix_compiler_tests {
-    use super::*;
-
     /// Spike: verify HelixQL compiler (helixc) is embeddable — parse a minimal schema in-process.
     #[test]
     fn helixql_parse_minimal_schema() {

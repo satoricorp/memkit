@@ -25,12 +25,11 @@ use crate::helix_store::{
     helix_try_cached_index_status, remove_helix_for_pack,
 };
 use crate::pack::{
-    add_source_root, copy_dir_into_sources, has_manifest_at, init_pack, load_manifest,
-    remove_source_root, resolve_pack_dir, resolve_source_roots, scrub_pack_from_dir,
+    add_source_root, has_manifest_at, init_pack, load_manifest, remove_source_root,
+    resolve_pack_dir, resolve_source_roots, scrub_pack_from_dir,
 };
 use crate::pack_location::PackLocation;
 use crate::publish::{publish_pack_to_s3, PublishDestination};
-use crate::memkit_txt::ensure_memkit_txt;
 use crate::registry::{pack_dir_for_path, ensure_registered, load_registry, remove_pack_by_path, resolve_pack_by_name_or_path};
 use crate::query::{run_query, run_query_multi};
 use crate::query_synth::{synthesize_answer_async, QueryProvider};
@@ -208,10 +207,7 @@ fn job_targets_this_pack(
 }
 
 fn job_is_index_work(j: &JobRecord) -> bool {
-    matches!(
-        j.job_type,
-        JobType::IndexSources | JobType::IndexNewPack | JobType::AddDocuments
-    )
+    matches!(j.job_type, JobType::IndexSources)
 }
 
 async fn status(
@@ -918,7 +914,6 @@ async fn enqueue_index_job(
         trigger: trigger.to_string(),
         pack_path: pack_path.clone(),
         cleanup_after_index: cleanup_after_index.clone(),
-        add_payload: None,
         indexing_sources,
         enqueued_at: Utc::now(),
         started_at: None,
@@ -928,37 +923,6 @@ async fn enqueue_index_job(
     };
     jobs.queue.push_back(id);
     jobs.jobs.push(record.clone());
-    json!(record)
-}
-
-/// Enqueue a job that sets up a new pack (copy, register) then runs index. Returns real job id so CLI can poll.
-async fn enqueue_index_new_pack_job(
-    state: &AppState,
-    dir_path: String,
-    name: Option<String>,
-) -> Value {
-    let mut jobs = state.jobs.lock().await;
-    let id = format!("job-{}", jobs.next_id);
-    jobs.next_id += 1;
-    let add_payload = name.map(|n| json!({ "name": n }));
-    let record = JobRecord {
-        id: id.clone(),
-        job_type: JobType::IndexNewPack,
-        state: JobState::Queued,
-        trigger: "manual_index".to_string(),
-        pack_path: Some(dir_path.clone()),
-        cleanup_after_index: None,
-        add_payload,
-        indexing_sources: Some(vec![dir_path]),
-        enqueued_at: Utc::now(),
-        started_at: None,
-        finished_at: None,
-        result: None,
-        error: None,
-    };
-    jobs.queue.push_back(id.clone());
-    jobs.jobs.push(record.clone());
-    drop(jobs);
     json!(record)
 }
 
@@ -973,7 +937,6 @@ async fn enqueue_remove_job(state: &AppState, pack_root: String) -> Value {
         trigger: "manual_remove".to_string(),
         pack_path: Some(pack_root),
         cleanup_after_index: None,
-        add_payload: None,
         indexing_sources: None,
         enqueued_at: Utc::now(),
         started_at: None,
@@ -992,14 +955,6 @@ fn start_next_job_if_idle(state: AppState) {
             Index {
                 packs: Vec<PathBuf>,
                 cleanup: Option<(String, String)>,
-            },
-            IndexNewPack {
-                dir_path: PathBuf,
-                name: Option<String>,
-            },
-            Add {
-                pack_path: PathBuf,
-                items: Vec<(String, String)>,
             },
             RemovePack { pack_root: PathBuf },
         }
@@ -1026,37 +981,6 @@ fn start_next_job_if_idle(state: AppState) {
                         .unwrap_or_else(PathBuf::new);
                     JobWork::RemovePack { pack_root }
                 }
-                Some(j) if matches!(j.job_type, JobType::IndexNewPack) => {
-                    let dir_path = j
-                        .pack_path
-                        .as_ref()
-                        .map(PathBuf::from)
-                        .unwrap_or_else(PathBuf::new);
-                    let name = j
-                        .add_payload
-                        .as_ref()
-                        .and_then(|p| p.get("name").and_then(Value::as_str))
-                        .map(String::from);
-                    JobWork::IndexNewPack { dir_path, name }
-                }
-                Some(j) if matches!(j.job_type, JobType::AddDocuments) => {
-                    let pack_path = j.pack_path.as_ref().map(PathBuf::from).unwrap_or_else(PathBuf::new);
-                    let items: Vec<(String, String)> = j
-                        .add_payload
-                        .as_ref()
-                        .and_then(|p| p.get("items").and_then(Value::as_array))
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|o| {
-                                    let c = o.get("content").and_then(Value::as_str).unwrap_or("").to_string();
-                                    let s = o.get("source_path").and_then(Value::as_str).unwrap_or("").to_string();
-                                    Some((c, s))
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    JobWork::Add { pack_path, items }
-                }
                 _ => {
                     // IndexSources or any other job type treated as index (pack_path from job or all packs).
                     let pack_path = job.as_ref().and_then(|j| j.pack_path.clone());
@@ -1074,39 +998,6 @@ fn start_next_job_if_idle(state: AppState) {
         };
 
         let run_outcome: Result<(Value, Option<(String, String)>), (anyhow::Error, Option<(String, String)>)> = match work {
-            JobWork::IndexNewPack { dir_path, name } => {
-                let run_result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-                    use std::ffi::OsStr;
-                    let pack_dir = pack_dir_for_path(&dir_path);
-                    let _ = ensure_memkit_txt(&dir_path);
-                    let source_name = dir_path
-                        .file_name()
-                        .unwrap_or_else(|| OsStr::new("unnamed"))
-                        .to_string_lossy();
-                    let outcome = copy_dir_into_sources(&dir_path, &pack_dir, &source_name)?;
-                    add_source_root(&pack_dir, &outcome.source_root)?;
-                    let normalized = dir_path.canonicalize()?.to_string_lossy().to_string();
-                    let reg = crate::registry::load_registry().unwrap_or_default();
-                    let is_first = reg.packs.is_empty();
-                    ensure_registered(&normalized, name, is_first)?;
-                    let manifest = load_manifest(&pack_dir)?;
-                    let sources = resolve_source_roots(&pack_dir, &manifest);
-                    let (scanned, updated, chunks, warnings) =
-                        run_index(&pack_dir, &sources)?;
-                    Ok(json!({
-                        "scanned": scanned,
-                        "updated_files": updated,
-                        "chunks": chunks,
-                        "warnings": warnings
-                    }))
-                })
-                .await;
-                match run_result {
-                    Ok(Ok(v)) => Ok((v, None)),
-                    Ok(Err(e)) => Err((e, None)),
-                    Err(e) => Err((anyhow::anyhow!("job task failed: {}", e), None)),
-                }
-            }
             JobWork::Index { packs: packs_to_index, cleanup: cleanup_after_index } => {
                 let run_result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
                     let mut total_scanned = 0usize;
@@ -1136,25 +1027,6 @@ fn start_next_job_if_idle(state: AppState) {
                     Ok(Ok(v)) => Ok((v, cleanup_after_index)),
                     Ok(Err(e)) => Err((e, cleanup_after_index)),
                     Err(e) => Err((anyhow::anyhow!("job task failed: {}", e), cleanup_after_index)),
-                }
-            }
-            JobWork::Add { pack_path, items } => {
-                let run_result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-                    let mut total_chunks = 0usize;
-                    for (content, source_path) in &items {
-                        let chunks = run_add(&pack_path, content, source_path)?;
-                        total_chunks += chunks;
-                    }
-                    Ok(json!({
-                        "status": "ok",
-                        "chunks_added": total_chunks
-                    }))
-                })
-                .await;
-                match run_result {
-                    Ok(Ok(v)) => Ok((v, None)),
-                    Ok(Err(e)) => Err((e, None)),
-                    Err(e) => Err((anyhow::anyhow!("job task failed: {}", e), None)),
                 }
             }
             JobWork::RemovePack { pack_root } => {
