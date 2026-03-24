@@ -51,30 +51,29 @@ where
 
 // --- Theme helpers (stdout): roles for labels, data, state ---
 
-/// ASCII banner for `mk help` (magenta when color on).
-const HELP_BANNER: &str = r#" __    __     ______     __    __     __  __     __     ______  
-/\ "-./  \   /\  ___\   /\ "-./  \   /\ \/ /    /\ \   /\__  _\ 
-\ \ \-./\ \  \ \  __\   \ \ \-./\ \  \ \  _"-.  \ \ \  \/_/\ \/ 
- \ \_\ \ \_\  \ \_____\  \ \_\ \ \_\  \ \_\ \_\  \ \_\    \ \_\ 
-  \/_/  \/_/   \/_____/   \/_/  \/_/   \/_/\/_/   \/_/     \/_/ 
-                                                                "#;
+/// Logo banner for `mk help` (cyan when color on).
+const HELP_BANNER: &str = r#"                                      
+                                      
+▄▄   ▄▄ ▄▄▄▄▄ ▄▄   ▄▄ ▄▄ ▄▄ ▄▄ ▄▄▄▄▄▄ 
+██▀▄▀██ ██▄▄  ██▀▄▀██ ██▄█▀ ██   ██   
+██   ██ ██▄▄▄ ██   ██ ██ ██ ██   ██   
+                                      "#;
 
-/// Prints `mk help` header: banner (magenta) and copyright + version line.
+/// Prints `mk help` header: banner (cyan) and copyright + version line.
 pub fn print_help_title(color: bool) {
     for line in HELP_BANNER.lines() {
         if color {
-            println!("{}", line.magenta());
+            println!("{}", line.cyan());
         } else {
             println!("{}", line);
         }
     }
-    println!(
-        "{}",
-        dimmed_word(
-            color,
-            &format!("© Satori Engineering Inc. 2026 Version {}", PKG_VERSION),
-        )
-    );
+    let copyright = format!("© Satori Engineering Inc. 2026 Version {}", PKG_VERSION);
+    if color {
+        println!("{}", copyright.cyan());
+    } else {
+        println!("{}", copyright);
+    }
 }
 
 /// Section heading (doctor, models).
