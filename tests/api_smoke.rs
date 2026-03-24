@@ -56,7 +56,7 @@ fn pick_port() -> u16 {
 fn start_server(pack_root: &Path, port: u16) -> Child {
     Command::new(env!("CARGO_BIN_EXE_mk"))
         .args([
-            "serve",
+            "start",
             "--pack",
             &pack_root.to_string_lossy(),
             "--host",
@@ -68,7 +68,7 @@ fn start_server(pack_root: &Path, port: u16) -> Child {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("start mk serve")
+        .expect("start mk start")
 }
 
 fn wait_for_health(base_url: &str) {

@@ -10,7 +10,7 @@ This file is the authoritative current-state reference for runtime behavior.
 ## Runtime defaults
 
 - API bind: `127.0.0.1:4242` (unless overridden by `API_HOST`/`API_PORT`)
-- Server command: `mk serve`
+- Server command: `mk start`
 - Stop command: `mk stop`
 
 ## Storage
@@ -28,7 +28,7 @@ This file is the authoritative current-state reference for runtime behavior.
 - `mk query`
 - `mk publish`
 - `mk use pack <name>` / `mk use model <id>` (shell); JSON `use` still supports show/set
-- `mk serve`
+- `mk start`
 - `mk stop`
 - `mk schema`
 

@@ -19,4 +19,4 @@ ENV API_PORT=4242
 
 EXPOSE 4242
 
-CMD ["mk", "serve", "--foreground"]
+CMD ["mk", "start", "--foreground"]

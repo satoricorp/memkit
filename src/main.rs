@@ -353,9 +353,9 @@ fn has_any_flag(args: &[String], flags: &[&str]) -> bool {
     args.iter().any(|a| flags.iter().any(|f| a == f))
 }
 
-fn parse_serve(args: &[String]) -> Result<Option<ServeConfig>> {
-    let is_serve = args.first().map(|a| a == "--headless-serve").unwrap_or(false);
-    if !is_serve {
+fn parse_headless_start(args: &[String]) -> Result<Option<ServeConfig>> {
+    let is_headless = args.first().map(|a| a == "--headless-start").unwrap_or(false);
+    if !is_headless {
         return Ok(None);
     }
 
@@ -495,7 +495,7 @@ fn cli_command_from_json(cmd: &str, j: &serde_json::Value) -> Result<CliCommand>
                 format,
             })
         }
-        "serve" => {
+        "start" => {
             let pack = get_str("pack");
             let host = get_str("host");
             let port = get_u64("port")
@@ -694,7 +694,7 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
         }
         "list" => Ok(CliCommand::List),
         "doctor" => Ok(CliCommand::Doctor),
-        "serve" => {
+        "start" => {
             let pack = flag_value(&args[1..], "--pack");
             let host = flag_value(&args[1..], "--host");
             let port = flag_value(&args[1..], "--port")
@@ -894,7 +894,7 @@ fn print_help() {
     print_help_cmd_line_grouped(c, "use pack", " <name-or-path>   (set default pack)");
     print_help_cmd_line_grouped(c, "use model", " <model-id>   (set default model)");
     print_help_section(c, "Server", false);
-    print_help_cmd_line_grouped(c, "serve", " [--pack <path>] [--host H] [--port P] [--foreground]");
+    print_help_cmd_line_grouped(c, "start", " [--pack <path>] [--host H] [--port P] [--foreground]");
     print_help_cmd_line_grouped(c, "stop", " [--port P]");
     print_help_section(c, "Diagnostics & Schemas", false);
     print_help_cmd_line_grouped(c, "doctor", "   (config path + server /health reachability)");
@@ -1012,7 +1012,7 @@ async fn run() -> Result<()> {
 
     config::ensure_config_exists().context("failed to create config (e.g. ~/.config/memkit/memkit.json)")?;
 
-    if let Some(cfg) = parse_serve(&args)? {
+    if let Some(cfg) = parse_headless_start(&args)? {
         serve_with_startup(cfg.packs, cfg.host, cfg.port).await?;
         return Ok(());
     }

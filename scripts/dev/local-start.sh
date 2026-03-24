@@ -30,7 +30,7 @@ else
     ${MEMKIT_ONTOLOGY_MODEL:+MEMKIT_ONTOLOGY_MODEL="$MEMKIT_ONTOLOGY_MODEL"} \
     ${OPENAI_API_KEY:+OPENAI_API_KEY="$OPENAI_API_KEY"} \
     "${ROOT_DIR}/target/release/mk" \
-    serve \
+    start \
     --pack "$PACK_PATHS" \
     --host "$API_HOST" \
     --port "$API_PORT" \

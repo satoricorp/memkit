@@ -14,7 +14,7 @@ pub const SCHEMA_COMMANDS: &[&str] = &[
     "list",
     "doctor",
     "schema",
-    "serve",
+    "start",
     "stop",
     "help",
     "version",
@@ -95,9 +95,9 @@ fn examples_for_command(cmd: &str) -> serde_json::Value {
             &["mk schema --format json-schema query", "mk schema query"],
             &["mk -j '{\"command\":\"schema\",\"format\":\"json-schema\",\"schema\":\"query\"}'"],
         ),
-        "serve" => example_list(
-            &["mk serve --pack ./memory-pack --host 127.0.0.1 --port 4242 --foreground"],
-            &["mk -j '{\"command\":\"serve\",\"pack\":\"./memory-pack\",\"host\":\"127.0.0.1\",\"port\":4242,\"foreground\":true}'"],
+        "start" => example_list(
+            &["mk start --pack ./memory-pack --host 127.0.0.1 --port 4242 --foreground"],
+            &["mk -j '{\"command\":\"start\",\"pack\":\"./memory-pack\",\"host\":\"127.0.0.1\",\"port\":4242,\"foreground\":true}'"],
         ),
         "stop" => example_list(
             &["mk stop --port 4242"],
@@ -259,8 +259,8 @@ pub fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                 }
             }
         }),
-        "serve" => serde_json::json!({
-            "command": "serve",
+        "start" => serde_json::json!({
+            "command": "start",
             "input": {
                 "type": "object",
                 "properties": {
@@ -436,10 +436,10 @@ fn input_json_schema_for_command(cmd: &str) -> Option<serde_json::Value> {
             }),
             vec![json!({ "format": "json-schema", "schema": "query" }), json!({})],
         ),
-        "serve" => json_schema_attach_examples(
+        "start" => json_schema_attach_examples(
             json!({
                 "$schema": schema_uri,
-                "title": "mk serve (JSON input)",
+                "title": "mk start (JSON input)",
                 "type": "object",
                 "properties": {
                     "pack": { "type": "string" },

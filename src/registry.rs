@@ -306,7 +306,7 @@ fn ensure_default_pack_for_empty_registry() -> Result<PathBuf> {
     )
 }
 
-/// Pack paths used when starting `mk serve` without `--pack` (all registered packs).
+/// Pack paths used when starting `mk start` without `--pack` (all registered packs).
 pub fn default_serve_pack_paths() -> Result<Vec<PathBuf>> {
     let _ = ensure_default_if_unset();
     let reg = load_registry().unwrap_or_default();

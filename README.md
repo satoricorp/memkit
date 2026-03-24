@@ -20,8 +20,8 @@ cargo build --release
 ./scripts/local-start.sh
 
 # Or run server directly (single or multiple packs, comma-delimited)
-mk serve --pack ./memory-pack
-mk serve --pack ./pack1,./pack2
+mk start --pack ./memory-pack
+mk start --pack ./pack1,./pack2
 
 # CLI commands (require server to be running)
 mk list
@@ -43,7 +43,7 @@ mk doctor
 - `mk use pack <name-or-path>` — Set default pack.
 - `mk use model <model-id>` — Set default model (see `mk list` for IDs).
 - `mk doctor` — Config path and whether the API is reachable (`GET /health`).
-- `mk serve [--pack <path>] [--host] [--port] [--foreground]` — Start server (background by default).
+- `mk start [--pack <path>] [--host] [--port] [--foreground]` — Start server (background by default).
 - `mk stop [--port]` — Stop background server on the configured port.
 - `mk schema [--format json|json-schema] [command]` — Introspect memkit or JSON Schema for agent inputs.
 
@@ -80,7 +80,7 @@ Full detail: [docs/llm-configuration.md](docs/llm-configuration.md).
 ## Environment
 
 - `API_HOST` / `API_PORT` (defaults `127.0.0.1` / `4242`)
-- `MEMKIT_PACK_PATH` (default `./memory-pack` when using serve)
+- `MEMKIT_PACK_PATH` (default `./memory-pack` when using start)
 - `MEMKIT_PACK_PATHS` — Comma-delimited pack paths for multi-pack mode (overrides `MEMKIT_PACK_PATH` when set)
 - `MEMKIT_HELIX_ROOT` — Helix pack DB base directory (default `~/.memkit/helix`)
 - `OPENAI_API_KEY` — Required for query synthesis (OpenAI path; no local GGUF fallback in default builds)

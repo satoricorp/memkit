@@ -208,7 +208,7 @@ pub async fn require_server_running(cfg: &ServerConfig) -> Result<()> {
         return Ok(());
     }
     Err(anyhow!(
-        "memkit server is not running at {}. Start it with `mk serve` or `mk serve --foreground`.",
+        "memkit server is not running at {}. Start it with `mk start` or `mk start --foreground`.",
         cfg.base_url()
     ))
 }
@@ -255,7 +255,7 @@ pub async fn wait_for_server_ready(cfg: &ServerConfig) -> Result<()> {
         tokio::time::sleep(ENSURE_SERVER_POLL).await;
     }
     Err(anyhow!(
-        "memkit server did not become ready at {} within {}s (check port {} or run `mk serve --foreground` for logs)",
+        "memkit server did not become ready at {} within {}s (check port {} or run `mk start --foreground` for logs)",
         cfg.base_url(),
         ENSURE_SERVER_MAX_WAIT.as_secs(),
         cfg.port
@@ -271,7 +271,7 @@ pub async fn ensure_server(cfg: &ServerConfig) -> Result<()> {
 
     let exe = std::env::current_exe().context("current exe")?;
     let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("serve")
+    cmd.arg("start")
         .arg("--host")
         .arg(&cfg.host)
         .arg("--port")
@@ -298,7 +298,7 @@ pub fn print_server_note_running(cfg: &ServerConfig, output_json: bool) {
     );
 }
 
-/// One-line hint on stderr for `mk doctor`: port status if up, else how to start `mk serve`.
+/// One-line hint on stderr for `mk doctor`: port status if up, else how to start `mk start`.
 pub async fn print_server_note_doctor(cfg: &ServerConfig, output_json: bool) {
     if output_json {
         return;
@@ -307,7 +307,7 @@ pub async fn print_server_note_doctor(cfg: &ServerConfig, output_json: bool) {
     if server_is_up(cfg).await {
         return;
     }
-    let hint = format!("mk serve --host {} --port {}", cfg.host, cfg.port);
+    let hint = format!("mk start --host {} --port {}", cfg.host, cfg.port);
     eprintln!(
         "{} {} {}",
         term::data_num(c, "server not running"),
@@ -912,7 +912,7 @@ pub async fn query(cfg: &ServerConfig, args: &QueryArgs, pack: Option<&str>) -> 
                 || msg.contains("failed to connect");
             return Err(if connection_error {
                 anyhow!(e).context(
-                    "Could not reach the memkit server. If it was stopped, run `mk query` or `mk serve` again.",
+                    "Could not reach the memkit server. If it was stopped, run `mk query` or `mk start` again.",
                 )
             } else {
                 anyhow!(e)

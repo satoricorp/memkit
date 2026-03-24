@@ -4,7 +4,7 @@ This document provides guidance for AI agents invoking the memkit CLI (`mk`).
 
 ## Overview
 
-memkit is a local memory pack CLI. The server must be running (`mk serve` or `./scripts/local-start.sh`) before most commands.
+memkit is a local memory pack CLI. The server must be running (`mk start` or `./scripts/local-start.sh`) before most commands.
 
 ## Agent JSON (single entry point)
 

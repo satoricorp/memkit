@@ -65,7 +65,7 @@ README.md, CONTEXT.md
 | Scripts | Role |
 |---------|------|
 | `local-build.sh` | `cargo build --release --bin mk` from repo root |
-| `local-start.sh` | Build `mk` if missing, then background `mk serve` (pid + log under `.local-run/`) |
+| `local-start.sh` | Build `mk` if missing, then background `mk start` (pid + log under `.local-run/`) |
 | `local-stop.sh` | Stop the background `mk` process |
 | `local-status.sh` | Pid status + `GET /health` |
 
