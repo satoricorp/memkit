@@ -198,3 +198,44 @@ pub fn bold_yellow(color: bool, s: &str) -> String {
 pub fn sync_local_only_label(color: bool) -> String {
     dimmed_word(color, "sync: local only")
 }
+
+/// Bullet prefix for CLI banners (`mk list` / `mk status` on stdout, server notes on stderr).
+pub const BULLET: &str = "⏺";
+
+/// `⏺` on stdout: green when ok, red when not; unstyled when color off.
+pub fn stdout_dot_green_red(color: bool, ok: bool) -> String {
+    if !color {
+        return BULLET.to_string();
+    }
+    if ok {
+        BULLET.green().to_string()
+    } else {
+        BULLET.red().to_string()
+    }
+}
+
+/// `⏺ Server` on stderr: green when ok, red when not; unstyled when color off.
+pub fn stderr_bullet_server_word(color: bool, ok: bool) -> String {
+    let s = format!("{} Server", BULLET);
+    if !color {
+        return s;
+    }
+    if ok {
+        s.green().to_string()
+    } else {
+        s.red().to_string()
+    }
+}
+
+/// `⏺ Pack` on stderr: cyan when ok, red when not; unstyled when color off.
+pub fn stderr_bullet_pack_word(color: bool, ok: bool) -> String {
+    let s = format!("{} Pack", BULLET);
+    if !color {
+        return s;
+    }
+    if ok {
+        s.cyan().to_string()
+    } else {
+        s.red().to_string()
+    }
+}

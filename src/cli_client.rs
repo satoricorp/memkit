@@ -36,27 +36,24 @@ fn pack_path_display(p: &RegistryPack, home_canon: &Option<PathBuf>) -> String {
     }
 }
 
-fn pack_list_paren_label(p: &RegistryPack, reg: &Registry, home_canon: &Option<PathBuf>) -> Option<String> {
-    if let Some(ref n) = p.name {
-        return Some(format!("({})", n));
+/// Inner text for `[…]` in server banner (name, `default`, or directory name).
+/// Pack to show for the server banner: explicit `default_path`, or a pack with `default`, or the sole pack.
+fn resolve_default_pack<'a>(reg: &'a Registry) -> Option<&'a RegistryPack> {
+    if reg.packs.is_empty() {
+        return None;
     }
-    let path_is_home = PathBuf::from(&p.path)
-        .canonicalize()
-        .ok()
-        .as_ref()
-        == home_canon.as_ref();
-    let is_default_pack = p.default
-        || reg.default_path.as_deref() == Some(p.path.as_str())
-        || reg.packs.len() == 1
-        || (path_is_home && reg.default_path.is_none());
-    if is_default_pack {
-        Some("(default)".to_string())
-    } else {
-        None
+    if let Some(ref dp) = reg.default_path {
+        return reg.packs.iter().find(|p| p.path == *dp);
     }
+    if let Some(p) = reg.packs.iter().find(|p| p.default) {
+        return Some(p);
+    }
+    if reg.packs.len() == 1 {
+        return reg.packs.first();
+    }
+    None
 }
 
-/// Inner text for `[…]` in server banner (name, `default`, or directory name).
 fn pack_bracket_inner(p: &RegistryPack, reg: &Registry, home_canon: &Option<PathBuf>) -> String {
     if let Some(ref n) = p.name {
         return n.clone();
@@ -78,6 +75,13 @@ fn pack_bracket_inner(p: &RegistryPack, reg: &Registry, home_canon: &Option<Path
         .and_then(|s| s.to_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "pack".to_string())
+}
+
+/// Plain-text output for [`list`]: bare `mk status` (banner only) vs `mk list` (banner + packs).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ListOutputKind {
+    Status,
+    Full,
 }
 
 fn bracket_local_cloud(c: bool, local_on: bool, cloud_on: bool) -> String {
@@ -309,39 +313,36 @@ pub async fn ensure_server(cfg: &ServerConfig) -> Result<()> {
     wait_for_server_ready(cfg).await
 }
 
-/// Two-line hint on stderr: server + default pack (after a successful `ensure_server`).
-pub fn print_server_note_running(cfg: &ServerConfig, output_json: bool) {
+/// Two-line hint on stderr: `⏺ Server` green / `⏺ Pack` cyan when ok; both red when not.
+pub async fn print_server_note_running(cfg: &ServerConfig, output_json: bool) {
     if output_json {
         return;
     }
     let c = term::color_stderr();
-    let bullet = "⏺";
-    let server_lbl = term::success_words(c, "Server");
-    let port_lbl = term::dimmed_word(c, &format!(":{}", cfg.port));
-    eprintln!("{} {} {}", bullet, server_lbl, port_lbl);
+    let server_up = server_is_up(cfg).await;
 
     let _ = crate::registry::ensure_default_if_unset();
     let reg = crate::registry::load_registry().unwrap_or_default();
     let home_canon = dirs::home_dir().and_then(|h| h.canonicalize().ok());
-    let pack = reg
-        .default_path
-        .as_ref()
-        .and_then(|dp| reg.packs.iter().find(|p| p.path == *dp))
-        .or_else(|| reg.packs.iter().find(|p| p.default))
-        .or_else(|| reg.packs.first());
+    let default_pack = resolve_default_pack(&reg);
+    let pack_ok = server_up && default_pack.is_some();
 
-    if let Some(p) = pack {
+    let server_prefix = term::stderr_bullet_server_word(c, server_up);
+    let pack_prefix = term::stderr_bullet_pack_word(c, pack_ok);
+    let port_lbl = term::dimmed_word(c, &format!(":{}", cfg.port));
+    eprintln!("{} {}", server_prefix, port_lbl);
+
+    if let Some(p) = default_pack {
         let inner = pack_bracket_inner(p, &reg, &home_canon);
         let bracketed = format!("[{}]", inner);
-        let bracket_styled = term::cyan_words(c, &bracketed);
         let path_disp = pack_path_display(p, &home_canon);
         let path_styled = term::dimmed_word(c, &path_disp);
-        eprintln!("{} Pack {} {}", bullet, bracket_styled, path_styled);
+        eprintln!("{} {} {}", pack_prefix, bracketed, path_styled);
     } else {
         eprintln!(
-            "{} Pack {}",
-            bullet,
-            term::dimmed_word(c, "(no pack registered)")
+            "{} {}",
+            pack_prefix,
+            term::dimmed_word(c, "(no default pack)")
         );
     }
 }
@@ -449,11 +450,51 @@ fn print_indexing_lines_from_job(c: bool, job: &Value, label: &str) -> bool {
             } else {
                 term::dimmed_word(c, label)
             };
-            println!("  {} {}", term::white_word(c, path), suffix);
+            println!("    - {} {}", term::white_word(c, path), suffix);
             printed += 1;
         }
     }
     printed > 0
+}
+
+/// Two-line stdout banner for `mk status` / `mk list` (replaces stderr `print_server_note_running` for those commands).
+async fn print_cli_list_banner(
+    cfg: &ServerConfig,
+    c: bool,
+    reg: &Registry,
+    home_canon: &Option<PathBuf>,
+) {
+    let server_up = server_is_up(cfg).await;
+    let dot = term::stdout_dot_green_red(c, server_up);
+    let green_word = term::success_words(c, "green");
+    let url_inner = cfg.base_url();
+    let url_bracket = term::bracketed_cyan(c, &url_inner);
+    println!("{} Server {} {}", dot, green_word, url_bracket);
+
+    let default_pack = resolve_default_pack(reg);
+    let pack_ok = server_up && default_pack.is_some();
+    let dot2 = term::stdout_dot_green_red(c, pack_ok);
+    if let Some(p) = default_pack {
+        let inner = pack_bracket_inner(p, reg, home_canon);
+        let name_bracket = term::bracketed_cyan(c, &inner);
+        let tags = if let Ok(data) = status(cfg, Some(&p.path)).await {
+            let indexed = data.get("indexed").and_then(Value::as_bool).unwrap_or(false);
+            let vector_count = data.get("vector_count").and_then(Value::as_u64).unwrap_or(0);
+            let indexed_here = indexed && vector_count > 0;
+            let local_on = indexed_here && p.local;
+            let cloud_on = indexed_here && p.cloud;
+            bracket_local_cloud(c, local_on, cloud_on)
+        } else {
+            bracket_local_cloud(c, false, false)
+        };
+        println!("{} Pack {} {}", dot2, name_bracket, tags);
+    } else {
+        println!(
+            "{} Pack {}",
+            dot2,
+            term::dimmed_word(c, "(no default pack)")
+        );
+    }
 }
 
 pub fn print_status(data: &Value) {
@@ -665,17 +706,35 @@ pub fn print_status(data: &Value) {
     }
 }
 
-pub async fn list(cfg: &ServerConfig, output_json: bool) -> Result<Value> {
+pub async fn list(
+    cfg: &ServerConfig,
+    output_json: bool,
+    kind: ListOutputKind,
+) -> Result<Value> {
     let _ = crate::registry::ensure_default_if_unset();
     let reg = crate::registry::load_registry().unwrap_or_default();
+    let home_canon = dirs::home_dir().and_then(|h| h.canonicalize().ok());
+    let default_path_opt = resolve_default_pack(&reg).map(|p| p.path.as_str().to_string());
+
     if reg.packs.is_empty() {
         if !output_json {
             let c = term::color_stdout();
-            let msg = "No memory packs. Run `mk add <filename>` to add data to your default memory pack.";
-            if c {
-                println!("{}", term::dimmed_word(c, msg));
-            } else {
-                println!("{}", msg);
+            print_cli_list_banner(cfg, c, &reg, &home_canon).await;
+            match kind {
+                ListOutputKind::Status => {
+                    println!();
+                    println!();
+                }
+                ListOutputKind::Full => {
+                    println!();
+                    println!("{}", term::section_title(c, "Packs"));
+                    let msg = "No memory packs. Run `mk add <filename>` to add data to your default memory pack.";
+                    if c {
+                        println!("{}", term::dimmed_word(c, msg));
+                    } else {
+                        println!("{}", msg);
+                    }
+                }
             }
         }
         return Ok(json!({ "packs": [] }));
@@ -683,17 +742,23 @@ pub async fn list(cfg: &ServerConfig, output_json: bool) -> Result<Value> {
 
     if !output_json {
         let c = term::color_stdout();
-        let home_canon = dirs::home_dir().and_then(|h| h.canonicalize().ok());
-        let max_path_w = reg
-            .packs
-            .iter()
-            .map(|p| pack_path_display(p, &home_canon).len())
-            .max()
-            .unwrap_or(0);
+        print_cli_list_banner(cfg, c, &reg, &home_canon).await;
+        if kind == ListOutputKind::Status {
+            println!();
+            println!();
+            return Ok(json!({ "packs": reg.packs }));
+        }
+        println!();
+        println!("{}", term::section_title(c, "Packs"));
         for p in &reg.packs {
             let path_display = pack_path_display(p, &home_canon);
-            let padded_path = format!("{:<width$}", path_display, width = max_path_w);
-            let paren = pack_list_paren_label(p, &reg, &home_canon);
+            let is_default_line = default_path_opt
+                .as_ref()
+                .map(|dp| dp == &p.path)
+                .unwrap_or(false);
+            let line_prefix = if is_default_line { "* " } else { "  " };
+            let inner = pack_bracket_inner(p, &reg, &home_canon);
+            let name_bracket = term::bracketed_cyan(c, &inner);
             if let Ok(data) = status(cfg, Some(&p.path)).await {
                 let indexed = data.get("indexed").and_then(Value::as_bool).unwrap_or(false);
                 let vector_count = data.get("vector_count").and_then(Value::as_u64).unwrap_or(0);
@@ -701,6 +766,7 @@ pub async fn list(cfg: &ServerConfig, output_json: bool) -> Result<Value> {
                 let local_on = indexed_here && p.local;
                 let cloud_on = indexed_here && p.cloud;
                 let tags = bracket_local_cloud(c, local_on, cloud_on);
+                println!("{}{} {}", line_prefix, name_bracket, tags);
                 let pending_add = data.get("pending_add").and_then(Value::as_bool).unwrap_or(false);
                 let jobs = data.get("jobs").and_then(Value::as_object);
                 let active_val = jobs.and_then(|j| {
@@ -720,7 +786,11 @@ pub async fn list(cfg: &ServerConfig, output_json: bool) -> Result<Value> {
                     })
                     .map(|a| a.as_slice())
                     .unwrap_or(&[]);
-                let queued_jobs = jobs.and_then(|j| j.get("queued_jobs")).and_then(Value::as_array).map(|a| a.as_slice()).unwrap_or(&[]);
+                let queued_jobs = jobs
+                    .and_then(|j| j.get("queued_jobs"))
+                    .and_then(Value::as_array)
+                    .map(|a| a.as_slice())
+                    .unwrap_or(&[]);
                 let active_obj_early = active_val.and_then(Value::as_object);
                 let pack_path_str = p.path.as_str();
                 let mut show_removing =
@@ -742,46 +812,25 @@ pub async fn list(cfg: &ServerConfig, output_json: bool) -> Result<Value> {
                     });
                     show_removing = is_remove_for_active || queued_jobs.iter().any(remove_for_pack);
                 }
-                if c {
-                    if let Some(ref lab) = paren {
-                        let label_disp = if lab == "(default)" {
-                            term::magenta_words(c, lab)
-                        } else {
-                            term::cyan_label(c, lab)
-                        };
-                        println!("  {} {}", tags, label_disp);
-                    } else {
-                        println!("  {}", tags);
-                    }
-                    if show_removing {
+                if show_removing {
+                    if c {
                         println!(
-                            "  {} {}",
-                            term::white_word(c, &padded_path),
+                            "    - {} {}",
+                            term::white_word(c, &path_display),
                             term::warn_words(c, "removing...")
                         );
                     } else {
-                        println!("  {}", term::white_word(c, &padded_path));
-                    }
-                } else if let Some(ref lab) = paren {
-                    println!("  {} {}", tags, lab);
-                    if show_removing {
-                        println!("  {} removing...", padded_path);
-                    } else {
-                        println!("  {}", padded_path);
-                    }
-                } else {
-                    println!("  {}", tags);
-                    if show_removing {
-                        println!("  {} removing...", padded_path);
-                    } else {
-                        println!("  {}", padded_path);
+                        println!("    - {} removing...", path_display);
                     }
                 }
                 let indexed = data.get("indexed").and_then(Value::as_bool).unwrap_or(false);
                 let vector_count = data.get("vector_count").and_then(Value::as_u64).unwrap_or(0) as usize;
                 let entities = data.get("entities").and_then(Value::as_u64).unwrap_or(0) as usize;
                 let relationships = data.get("relationships").and_then(Value::as_u64).unwrap_or(0) as usize;
-                let counts_suffix = format!("{} vectors, {} entities, {} relationships", vector_count, entities, relationships);
+                let counts_suffix = format!(
+                    "{} vectors, {} entities, {} relationships",
+                    vector_count, entities, relationships
+                );
                 let source_root_paths: Vec<String> = data
                     .get("source_root_paths")
                     .and_then(Value::as_array)
@@ -813,12 +862,12 @@ pub async fn list(cfg: &ServerConfig, output_json: bool) -> Result<Value> {
                                     .unwrap_or("?");
                                 if c {
                                     println!(
-                                        "  {} {}",
+                                        "    - {} {}",
                                         term::dimmed_word(c, id),
                                         term::bold_green(c, "indexing...")
                                     );
                                 } else {
-                                    println!("  {} indexing...", id);
+                                    println!("    - {} indexing...", id);
                                 }
                                 printed = true;
                             }
@@ -835,79 +884,62 @@ pub async fn list(cfg: &ServerConfig, output_json: bool) -> Result<Value> {
                                 .unwrap_or("?");
                             if c {
                                 println!(
-                                    "  {} {}",
+                                    "    - {} {}",
                                     term::dimmed_word(c, id),
                                     term::warn_words(c, "...pending")
                                 );
                             } else {
-                                println!("  {} ...pending", id);
+                                println!("    - {} ...pending", id);
                             }
                         }
                         if c {
-                            println!("  {}", term::dimmed_word(c, &counts_suffix));
+                            println!("    {}", term::dimmed_word(c, &counts_suffix));
                         } else {
-                            println!("  {}", counts_suffix);
+                            println!("    {}", counts_suffix);
                         }
                     } else if !indexed {
                         let line = format!("not indexed ({})", counts_suffix);
                         if c {
-                            println!("  {}", term::dimmed_word(c, &line));
+                            println!("    {}", term::dimmed_word(c, &line));
                         } else {
-                            println!("  {}", line);
+                            println!("    {}", line);
                         }
+                    } else if c {
+                        println!("    {}", term::dimmed_word(c, &counts_suffix));
                     } else {
-                        if c {
-                            println!("  {}", term::dimmed_word(c, &counts_suffix));
-                        } else {
-                            println!("  {}", counts_suffix);
-                        }
+                        println!("    {}", counts_suffix);
                     }
                 }
                 if !show_removing {
                     for w in &index_warnings {
                         if c {
-                            println!("  {}", term::danger_words(c, w));
+                            println!("    {}", term::danger_words(c, w));
                         } else {
-                            println!("  {}", w);
+                            println!("    {}", w);
                         }
                     }
                     if !pending_add {
                         for s in &source_root_paths {
                             if c {
-                                println!("  {}", term::dimmed_word(c, s));
+                                println!("    - {}", term::dimmed_word(c, s));
                             } else {
-                                println!("  {}", s);
+                                println!("    - {}", s);
                             }
                         }
                     }
                 }
             } else {
                 let tags = bracket_local_cloud(c, false, false);
+                println!("{}{} {}", line_prefix, name_bracket, tags);
                 if c {
-                    if let Some(ref lab) = paren {
-                        let label_disp = if lab == "(default)" {
-                            term::magenta_words(c, lab)
-                        } else {
-                            term::cyan_label(c, lab)
-                        };
-                        println!(
-                            "{} {} {}",
-                            term::white_word(c, &padded_path),
-                            tags,
-                            label_disp
-                        );
-                    } else {
-                        println!("{} {}", term::white_word(c, &padded_path), tags);
-                    }
-                } else if let Some(ref lab) = paren {
-                    println!("{} {} {}", padded_path, tags, lab);
+                    println!("    - {}", term::white_word(c, &path_display));
                 } else {
-                    println!("{} {}", padded_path, tags);
+                    println!("    - {}", path_display);
                 }
             }
         }
     }
-    Ok(json!({"packs": reg.packs}))
+    Ok(json!({ "packs": reg.packs }))
 }
 
 pub async fn remove(cfg: &ServerConfig, path: &str) -> Result<Value> {

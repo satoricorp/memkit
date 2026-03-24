@@ -798,7 +798,7 @@ fn print_models_section() {
     let supported = config::supported_models();
     let c = crate::term::color_stdout();
     println!();
-    println!("{}", crate::term::section_title(c, "Available Models:"));
+    println!("{}", crate::term::section_title(c, "Models"));
     for (id, desc) in &supported {
         let mark = if cfg.model.as_deref() == Some(*id) {
             "[*]"
@@ -1135,7 +1135,14 @@ async fn run() -> Result<()> {
                 } else {
                     cli_client::ensure_server(&cfg).await?;
                 }
-                cli_client::print_server_note_running(&cfg, ctx.output_format == OutputFormat::Json);
+                let skip_stderr_server_note = matches!(
+                    &cmd,
+                    CliCommand::Status { dir: None } | CliCommand::List
+                ) && ctx.output_format != OutputFormat::Json;
+                if !skip_stderr_server_note {
+                    cli_client::print_server_note_running(&cfg, ctx.output_format == OutputFormat::Json)
+                        .await;
+                }
             }
 
             enum CommandOut {
@@ -1239,7 +1246,9 @@ async fn run() -> Result<()> {
                 CliCommand::Status { dir } => {
                     let output_json = ctx.output_format == OutputFormat::Json;
                     if dir.is_none() {
-                        let data = cli_client::list(&cfg, output_json).await?;
+                        let data =
+                            cli_client::list(&cfg, output_json, cli_client::ListOutputKind::Status)
+                                .await?;
                         if output_json {
                             let json_str = serde_json::to_string_pretty(&data)?;
                             println!("{}", json_str);
@@ -1257,7 +1266,9 @@ async fn run() -> Result<()> {
                 }
                 CliCommand::List => {
                     let output_json = ctx.output_format == OutputFormat::Json;
-                    let pack_data = cli_client::list(&cfg, output_json).await?;
+                    let pack_data =
+                        cli_client::list(&cfg, output_json, cli_client::ListOutputKind::Full)
+                            .await?;
                     if output_json {
                         let merged = serde_json::json!({
                             "packs": pack_data,
