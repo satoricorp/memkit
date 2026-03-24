@@ -851,7 +851,12 @@ fn print_help() {
         crate::term::dimmed_word(c, &format!("version {}", crate::term::PKG_VERSION))
     );
     println!();
-    println!("{}", crate::term::dimmed_word(c, "Usage:"));
+    println!(
+        "  {}",
+        crate::term::dimmed_word(c, "Global flags: [--output json|text] [--dry-run] [--version | -V]")
+    );
+    println!();
+    println!("  {}", crate::term::section_title(c, "Agents"));
     println!(
         "  {} {} {}{}",
         crate::term::dimmed_word(c, "Agent JSON:"),
@@ -859,12 +864,6 @@ fn print_help() {
         crate::term::bold_word(c, "-j"),
         crate::term::dimmed_word(c, " '<JSON>'  (same as --json / --mjson; object must include \"command\")")
     );
-    println!(
-        "  {}",
-        crate::term::dimmed_word(c, "Global flags: [--output json|text] [--dry-run] [--version | -V]")
-    );
-    println!();
-    println!("{}", crate::term::dimmed_word(c, "Commands:"));
     println!();
     print_help_section(c, "Storage", true);
     print_help_cmd_line_grouped(c, "add", " <path-or-url> [--pack <name-or-path>]");

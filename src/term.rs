@@ -51,13 +51,30 @@ where
 
 // --- Theme helpers (stdout): roles for labels, data, state ---
 
-/// Main title line (e.g. help header).
-pub fn title_app(color: bool) -> String {
-    if color {
-        "memkit CLI".bold().cyan().to_string()
-    } else {
-        "memkit CLI".to_string()
+/// ASCII banner for `mk help` (magenta when color on).
+const HELP_BANNER: &str = r#" __    __     ______     __    __     __  __     __     ______  
+/\ "-./  \   /\  ___\   /\ "-./  \   /\ \/ /    /\ \   /\__  _\ 
+\ \ \-./\ \  \ \  __\   \ \ \-./\ \  \ \  _"-.  \ \ \  \/_/\ \/ 
+ \ \_\ \ \_\  \ \_____\  \ \_\ \ \_\  \ \_\ \_\  \ \_\    \ \_\ 
+  \/_/  \/_/   \/_____/   \/_/  \/_/   \/_/\/_/   \/_/     \/_/ 
+                                                                "#;
+
+/// Prints `mk help` header: banner (magenta) and copyright + version line.
+pub fn print_help_title(color: bool) {
+    for line in HELP_BANNER.lines() {
+        if color {
+            println!("{}", line.magenta());
+        } else {
+            println!("{}", line);
+        }
     }
+    println!(
+        "{}",
+        dimmed_word(
+            color,
+            &format!("© Satori Engineering Inc. 2026 Version {}", PKG_VERSION),
+        )
+    );
 }
 
 /// Section heading (doctor, models).
@@ -105,15 +122,6 @@ pub fn white_word(color: bool, s: &str) -> String {
     }
 }
 
-/// Cyan parenthetical label e.g. `(default)` for pack list lines.
-pub fn cyan_label(color: bool, s: &str) -> String {
-    if color {
-        s.cyan().to_string()
-    } else {
-        s.to_string()
-    }
-}
-
 /// Bracketed detail for `mk doctor` lines, e.g. `[http://127.0.0.1:4242]` (cyan when color on).
 pub fn bracketed_cyan(color: bool, inner: &str) -> String {
     let s = format!("[{}]", inner);
@@ -138,15 +146,6 @@ pub fn data_num(color: bool, s: impl Display) -> String {
 pub fn magenta_words(color: bool, s: &str) -> String {
     if color {
         s.magenta().to_string()
-    } else {
-        s.to_string()
-    }
-}
-
-/// Active `[local]` / `[cloud]` tags in pack list (cyan when on).
-pub fn cyan_words(color: bool, s: &str) -> String {
-    if color {
-        s.cyan().to_string()
     } else {
         s.to_string()
     }
@@ -202,21 +201,9 @@ pub fn sync_local_only_label(color: bool) -> String {
 /// Bullet prefix for CLI banners (`mk list` / `mk status` on stdout, server notes on stderr).
 pub const BULLET: &str = "⏺";
 
-/// `⏺` on stdout: green when ok, red when not; unstyled when color off.
-pub fn stdout_dot_green_red(color: bool, ok: bool) -> String {
-    if !color {
-        return BULLET.to_string();
-    }
-    if ok {
-        BULLET.green().to_string()
-    } else {
-        BULLET.red().to_string()
-    }
-}
-
-/// `⏺ Server` on stderr: green when ok, red when not; unstyled when color off.
-pub fn stderr_bullet_server_word(color: bool, ok: bool) -> String {
-    let s = format!("{} Server", BULLET);
+/// `⏺` + label (`Server`, `Pack`, …): green when ok, red when not; unstyled when color off.
+pub fn bullet_green_word(color: bool, ok: bool, label: &str) -> String {
+    let s = format!("{} {}", BULLET, label);
     if !color {
         return s;
     }
@@ -227,15 +214,26 @@ pub fn stderr_bullet_server_word(color: bool, ok: bool) -> String {
     }
 }
 
-/// `⏺ Pack` on stderr: cyan when ok, red when not; unstyled when color off.
-pub fn stderr_bullet_pack_word(color: bool, ok: bool) -> String {
-    let s = format!("{} Pack", BULLET);
+/// `[url]` for the server line: `[` magenta, full `url` dimmed, `]` magenta when reachable; all dimmed when not.
+pub fn bracket_url_line(color: bool, server_up: bool, url: &str) -> String {
     if !color {
-        return s;
+        return format!("[{url}]");
     }
-    if ok {
-        s.cyan().to_string()
+    if server_up {
+        format!("{}{}{}", "[".magenta(), url.dimmed(), "]".magenta())
     } else {
-        s.red().to_string()
+        format!("[{}]", url).dimmed().to_string()
+    }
+}
+
+/// `[inner]` for `[local]` / `[cloud]`: entire tag cyan when `on`; all dimmed when off.
+pub fn bracket_tag_cyan_when_on(color: bool, on: bool, inner: &str) -> String {
+    if !color {
+        return format!("[{inner}]");
+    }
+    if on {
+        format!("[{}]", inner).cyan().to_string()
+    } else {
+        format!("[{}]", inner).dimmed().to_string()
     }
 }

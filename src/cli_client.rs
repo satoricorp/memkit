@@ -85,16 +85,8 @@ pub enum ListOutputKind {
 }
 
 fn bracket_local_cloud(c: bool, local_on: bool, cloud_on: bool) -> String {
-    let local = if local_on {
-        term::cyan_words(c, "[local]")
-    } else {
-        term::dimmed_word(c, "[local]")
-    };
-    let cloud = if cloud_on {
-        term::cyan_words(c, "[cloud]")
-    } else {
-        term::dimmed_word(c, "[cloud]")
-    };
+    let local = term::bracket_tag_cyan_when_on(c, local_on, "local");
+    let cloud = term::bracket_tag_cyan_when_on(c, cloud_on, "cloud");
     format!("{} {}", local, cloud)
 }
 
@@ -313,7 +305,7 @@ pub async fn ensure_server(cfg: &ServerConfig) -> Result<()> {
     wait_for_server_ready(cfg).await
 }
 
-/// Two-line hint on stderr: `⏺ Server` green / `⏺ Pack` cyan when ok; both red when not.
+/// Two-line hint on stderr: green `⏺ Server` + `[url]` (magenta brackets, dimmed URL), green `⏺ Pack` + cyan `[name]` + cyan `[local]`/`[cloud]` when on.
 pub async fn print_server_note_running(cfg: &ServerConfig, output_json: bool) {
     if output_json {
         return;
@@ -327,17 +319,29 @@ pub async fn print_server_note_running(cfg: &ServerConfig, output_json: bool) {
     let default_pack = resolve_default_pack(&reg);
     let pack_ok = server_up && default_pack.is_some();
 
-    let server_prefix = term::stderr_bullet_server_word(c, server_up);
-    let pack_prefix = term::stderr_bullet_pack_word(c, pack_ok);
-    let port_lbl = term::dimmed_word(c, &format!(":{}", cfg.port));
-    eprintln!("{} {}", server_prefix, port_lbl);
+    let server_prefix = term::bullet_green_word(c, server_up, "Server");
+    let url_bracket = term::bracket_url_line(c, server_up, &cfg.base_url());
+    eprintln!("{} {}", server_prefix, url_bracket);
 
+    let pack_prefix = term::bullet_green_word(c, pack_ok, "Pack");
     if let Some(p) = default_pack {
         let inner = pack_bracket_inner(p, &reg, &home_canon);
-        let bracketed = format!("[{}]", inner);
-        let path_disp = pack_path_display(p, &home_canon);
-        let path_styled = term::dimmed_word(c, &path_disp);
-        eprintln!("{} {} {}", pack_prefix, bracketed, path_styled);
+        let name_bracket = term::bracketed_cyan(c, &inner);
+        let tags = if server_up {
+            if let Ok(data) = status(cfg, Some(&p.path)).await {
+                let indexed = data.get("indexed").and_then(Value::as_bool).unwrap_or(false);
+                let vector_count = data.get("vector_count").and_then(Value::as_u64).unwrap_or(0);
+                let indexed_here = indexed && vector_count > 0;
+                let local_on = indexed_here && p.local;
+                let cloud_on = indexed_here && p.cloud;
+                bracket_local_cloud(c, local_on, cloud_on)
+            } else {
+                bracket_local_cloud(c, false, false)
+            }
+        } else {
+            bracket_local_cloud(c, false, false)
+        };
+        eprintln!("{} {} {}", pack_prefix, name_bracket, tags);
     } else {
         eprintln!(
             "{} {}",
@@ -465,15 +469,14 @@ async fn print_cli_list_banner(
     home_canon: &Option<PathBuf>,
 ) {
     let server_up = server_is_up(cfg).await;
-    let dot = term::stdout_dot_green_red(c, server_up);
-    let green_word = term::success_words(c, "green");
     let url_inner = cfg.base_url();
-    let url_bracket = term::bracketed_cyan(c, &url_inner);
-    println!("{} Server {} {}", dot, green_word, url_bracket);
+    let server_prefix = term::bullet_green_word(c, server_up, "Server");
+    let url_bracket = term::bracket_url_line(c, server_up, &url_inner);
+    println!("{} {}", server_prefix, url_bracket);
 
     let default_pack = resolve_default_pack(reg);
     let pack_ok = server_up && default_pack.is_some();
-    let dot2 = term::stdout_dot_green_red(c, pack_ok);
+    let pack_prefix = term::bullet_green_word(c, pack_ok, "Pack");
     if let Some(p) = default_pack {
         let inner = pack_bracket_inner(p, reg, home_canon);
         let name_bracket = term::bracketed_cyan(c, &inner);
@@ -487,11 +490,11 @@ async fn print_cli_list_banner(
         } else {
             bracket_local_cloud(c, false, false)
         };
-        println!("{} Pack {} {}", dot2, name_bracket, tags);
+        println!("{} {} {}", pack_prefix, name_bracket, tags);
     } else {
         println!(
-            "{} Pack {}",
-            dot2,
+            "{} {}",
+            pack_prefix,
             term::dimmed_word(c, "(no default pack)")
         );
     }
