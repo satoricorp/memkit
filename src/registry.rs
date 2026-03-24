@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::pack::has_manifest_at;
+use crate::pack::{has_manifest_at, init_pack};
 
 const REGISTRY_DIR: &str = ".memkit";
 const REGISTRY_FILE: &str = "registry.json";
@@ -207,6 +207,23 @@ pub fn ensure_default_if_unset() -> Result<()> {
     Ok(())
 }
 
+/// Target for `mk remove`: with `dir` use name/path resolution; with no `dir` use the registry default pack (same as `mk status` default), not "cwd if it looks like a pack".
+pub fn resolve_remove_pack_target(dir: Option<&str>) -> Result<PathBuf> {
+    if let Some(arg) = dir {
+        return resolve_pack_by_name_or_path(arg);
+    }
+    ensure_default_if_unset()?;
+    let reg = load_registry()?;
+    let path = reg
+        .default_path
+        .as_ref()
+        .or_else(|| reg.packs.first().map(|p| &p.path))
+        .ok_or_else(|| anyhow!("no packs registered"))?;
+    PathBuf::from(path)
+        .canonicalize()
+        .with_context(|| format!("pack path no longer exists: {}", path))
+}
+
 /// Resolve a pack by name (registry) or by path. Returns the directory that contains the pack (parent of .memkit or pack root).
 pub fn resolve_pack_by_name_or_path(arg: &str) -> Result<PathBuf> {
     if arg == "default" {
@@ -243,12 +260,59 @@ pub fn resolve_pack_by_name_or_path(arg: &str) -> Result<PathBuf> {
     Err(anyhow::anyhow!("no memory pack at {}", path.display()))
 }
 
+/// When the registry has no entries, resolve cwd / `~` / create `~/.memkit` and register (same rules as CLI `ensure_pack_root(None)`).
+fn ensure_default_pack_for_empty_registry() -> Result<PathBuf> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let home_has_pack = dirs::home_dir()
+        .as_ref()
+        .map(|h| has_manifest_at(h))
+        .unwrap_or(false);
+    if !has_manifest_at(&cwd) && !home_has_pack {
+        let home = dirs::home_dir()
+            .ok_or_else(|| anyhow!("home directory not available"))?;
+        let pack_dir = pack_dir_for_path(&home);
+        init_pack(
+            &pack_dir,
+            false,
+            "fastembed",
+            "BAAI/bge-small-en-v1.5",
+            384,
+        )
+        .context("failed to init default pack")?;
+        let normalized = home
+            .canonicalize()
+            .context("home directory path invalid")?
+            .to_string_lossy()
+            .to_string();
+        ensure_registered(&normalized, Some("default".to_string()), true)?;
+        return home.canonicalize().context("home path invalid");
+    }
+    if has_manifest_at(&cwd) {
+        let canon = cwd.canonicalize().context("cwd path invalid")?;
+        let normalized = canon.to_string_lossy().to_string();
+        ensure_registered(&normalized, None, true)?;
+        return Ok(canon);
+    }
+    if let Some(home) = dirs::home_dir() {
+        if has_manifest_at(&home) {
+            let canon = home.canonicalize().context("home path invalid")?;
+            let normalized = canon.to_string_lossy().to_string();
+            ensure_registered(&normalized, None, true)?;
+            return Ok(canon);
+        }
+    }
+    anyhow::bail!(
+        "no memory pack found. use --pack <name-or-path> or run `mk add <path>` first"
+    )
+}
+
 /// Pack paths used when starting `mk serve` without `--pack` (all registered packs).
 pub fn default_serve_pack_paths() -> Result<Vec<PathBuf>> {
     let _ = ensure_default_if_unset();
     let reg = load_registry().unwrap_or_default();
     if reg.packs.is_empty() {
-        anyhow::bail!("no packs registered. Add a pack first (e.g. mk add <path>) or run with --pack <path>");
+        let root = ensure_default_pack_for_empty_registry()?;
+        return Ok(vec![root]);
     }
     Ok(reg.packs.iter().map(|p| PathBuf::from(&p.path)).collect())
 }
