@@ -896,7 +896,7 @@ fn print_help() {
 }
 
 fn print_version() {
-    println!("memkit {}", crate::term::PKG_VERSION);
+    println!("memkit {}", crate::term::BUILD_VERSION);
 }
 
 /// If dotenvy failed to set MEMKIT_GOOGLE_SERVICE_ACCOUNT_JSON (e.g. value has newlines), try loading

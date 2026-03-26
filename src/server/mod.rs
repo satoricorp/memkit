@@ -124,7 +124,8 @@ fn default_use_reranker() -> bool {
 
 #[derive(Serialize)]
 struct HealthResponse {
-    status: String,
+    status: &'static str,
+    version: &'static str,
 }
 
 pub async fn run_server(packs: Vec<PathBuf>, host: String, port: u16) -> Result<()> {
@@ -184,7 +185,8 @@ async fn health(State(_state): State<AppState>) -> (StatusCode, Json<HealthRespo
     (
         StatusCode::OK,
         Json(HealthResponse {
-            status: "ok".to_string(),
+            status: "ok",
+            version: crate::term::BUILD_VERSION,
         }),
     )
 }
@@ -1348,7 +1350,7 @@ async fn mcp(
     let result = match method {
         "initialize" => json!({
             "protocolVersion": "2024-11-05",
-            "serverInfo": {"name":"memkit","version":"0.1.0"},
+            "serverInfo": {"name":"memkit","version": crate::term::BUILD_VERSION},
             "capabilities": {"tools": {}}
         }),
         "tools/list" => json!({

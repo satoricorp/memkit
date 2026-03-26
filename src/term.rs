@@ -4,8 +4,8 @@ use std::io::IsTerminal;
 
 use owo_colors::OwoColorize;
 
-/// Crate / CLI version (from Cargo.toml).
-pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Build version embedded at compile time from `git rev-parse --short HEAD`.
+pub const BUILD_VERSION: &str = env!("MEMKIT_BUILD_VERSION");
 
 /// Returns true if we should use colors on stdout (TTY and NO_COLOR not set).
 pub fn color_stdout() -> bool {
@@ -65,11 +65,30 @@ pub fn print_help_title(color: bool) {
             println!("{}", line);
         }
     }
-    let copyright = format!("© Satori Engineering Inc. 2026 Version {}", PKG_VERSION);
+    let copyright = format!("© Satori Engineering Inc. 2026 Version {}", BUILD_VERSION);
     if color {
         println!("{}", copyright.cyan());
     } else {
         println!("{}", copyright);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BUILD_VERSION;
+
+    #[test]
+    fn build_version_is_git_short_sha_like() {
+        assert!(
+            BUILD_VERSION.len() >= 7 && BUILD_VERSION.len() <= 40,
+            "unexpected build version length: {}",
+            BUILD_VERSION
+        );
+        assert!(
+            BUILD_VERSION.chars().all(|c| c.is_ascii_hexdigit()),
+            "unexpected build version characters: {}",
+            BUILD_VERSION
+        );
     }
 }
 

@@ -8,6 +8,23 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 
+fn expected_git_version() -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("git rev-parse");
+    assert!(
+        output.status.success(),
+        "git rev-parse failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git rev-parse utf8")
+        .trim()
+        .to_string()
+}
+
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -99,6 +116,7 @@ fn stop_server(child: &mut Child) {
 fn smoke_health_status_add_query_flows() {
     let pack_root = unique_temp_dir("memkit-smoke-pack");
     create_pack_fixture(&pack_root);
+    let expected_version = expected_git_version();
 
     let docs_dir = pack_root.join("docs");
     fs::create_dir_all(&docs_dir).expect("create docs dir");
@@ -118,6 +136,32 @@ fn smoke_health_status_add_query_flows() {
         .json()
         .expect("health json");
     assert_eq!(health.get("status").and_then(Value::as_str), Some("ok"));
+    assert_eq!(
+        health.get("version").and_then(Value::as_str),
+        Some(expected_version.as_str())
+    );
+
+    let initialize: Value = client
+        .post(format!("{}/mcp", base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }))
+        .send()
+        .expect("mcp initialize response")
+        .json()
+        .expect("mcp initialize json");
+    assert_eq!(initialize.get("jsonrpc").and_then(Value::as_str), Some("2.0"));
+    assert_eq!(
+        initialize
+            .get("result")
+            .and_then(|result| result.get("serverInfo"))
+            .and_then(|server_info| server_info.get("version"))
+            .and_then(Value::as_str),
+        Some(expected_version.as_str())
+    );
 
     let status: Value = client
         .get(format!("{}/status", base_url))
