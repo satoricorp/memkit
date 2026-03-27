@@ -1,4 +1,4 @@
-import { mutation, query } from "./_generated/server";
+import { internalQuery, mutation, query } from "./_generated/server";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { v } from "convex/values";
 
@@ -16,6 +16,35 @@ const userArgs = {
   image_url: v.optional(v.string()),
   created_at: v.optional(v.string()),
   updated_at: v.optional(v.string()),
+};
+
+const toUserProfile = (
+  user: {
+    user_id?: number | null;
+    org_id?: number | null;
+    auth_id?: string | null;
+    name?: string | null;
+    email?: string | null;
+    image?: string | null;
+    image_url?: string | null;
+    created_at?: string | null;
+    updated_at?: string | null;
+  } | null,
+) => {
+  if (!user) {
+    return null;
+  }
+  return {
+    user_id: user.user_id ?? null,
+    org_id: user.org_id ?? null,
+    auth_id: user.auth_id ?? null,
+    name: user.name ?? null,
+    email: user.email ?? null,
+    image: user.image ?? null,
+    image_url: user.image_url ?? null,
+    created_at: user.created_at ?? null,
+    updated_at: user.updated_at ?? null,
+  };
 };
 
 
@@ -97,21 +126,14 @@ export const getUserByEmail = query({
 export const getUserById = query({
   args: { id: v.id("users") },
   handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.id);
-    if (!user) {
-      return null;
-    }
-    return {
-      user_id: user.user_id ?? null,
-      org_id: user.org_id ?? null,
-      auth_id: user.auth_id ?? null,
-      name: user.name ?? null,
-      email: user.email ?? null,
-      image: user.image ?? null,
-      image_url: user.image_url ?? null,
-      created_at: user.created_at ?? null,
-      updated_at: user.updated_at ?? null,
-    };
+    return toUserProfile(await ctx.db.get(args.id));
+  },
+});
+
+export const getUserProfileById = internalQuery({
+  args: { id: v.id("users") },
+  handler: async (ctx, args) => {
+    return toUserProfile(await ctx.db.get(args.id));
   },
 });
 

@@ -1,6 +1,6 @@
 # WWW boilerplate
 
-> **Repo note:** This `www/` Next.js app is a separate marketing/demo surface from the Rust `mk` CLI in the repo root. It is not required to build or run memkit; develop it independently.
+> **Repo note:** This `www/` Next.js app is the marketing/demo surface. The shared Convex backend now lives in the repo-root [`/Users/joe/git/memkit/convex`](/Users/joe/git/memkit/convex), not in `www/`.
 
 Config-first product website with auth, dashboard, checkout, and JSON-driven content.
 
@@ -21,6 +21,8 @@ bun dev
 ```
 
 Open http://localhost:3000
+
+For the shared Convex backend, run `npx convex dev` from `/Users/joe/git/memkit`.
 
 ## Environment variables
 

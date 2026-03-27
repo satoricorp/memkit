@@ -24,11 +24,7 @@ fn registry_job_pack_paths_match(registry_path: &str, job_pack_path: &str) -> bo
 }
 
 fn pack_path_display(p: &RegistryPack, home_canon: &Option<PathBuf>) -> String {
-    let path_is_home = PathBuf::from(&p.path)
-        .canonicalize()
-        .ok()
-        .as_ref()
-        == home_canon.as_ref();
+    let path_is_home = PathBuf::from(&p.path).canonicalize().ok().as_ref() == home_canon.as_ref();
     if path_is_home {
         "~/.memkit".to_string()
     } else {
@@ -58,11 +54,7 @@ fn pack_bracket_inner(p: &RegistryPack, reg: &Registry, home_canon: &Option<Path
     if let Some(ref n) = p.name {
         return n.clone();
     }
-    let path_is_home = PathBuf::from(&p.path)
-        .canonicalize()
-        .ok()
-        .as_ref()
-        == home_canon.as_ref();
+    let path_is_home = PathBuf::from(&p.path).canonicalize().ok().as_ref() == home_canon.as_ref();
     let is_default_pack = p.default
         || reg.default_path.as_deref() == Some(p.path.as_str())
         || reg.packs.len() == 1
@@ -239,11 +231,7 @@ fn tcp_listen_pids(port: u16) -> Result<Vec<String>> {
         .output()
         .context("lsof failed")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout
-        .trim()
-        .split_whitespace()
-        .map(String::from)
-        .collect())
+    Ok(stdout.trim().split_whitespace().map(String::from).collect())
 }
 
 /// SIGTERM listeners on `port`, then SIGKILL any still listening after a short wait.
@@ -329,8 +317,14 @@ pub async fn print_server_note_running(cfg: &ServerConfig, output_json: bool) {
         let name_bracket = term::bracketed_cyan(c, &inner);
         let tags = if server_up {
             if let Ok(data) = status(cfg, Some(&p.path)).await {
-                let indexed = data.get("indexed").and_then(Value::as_bool).unwrap_or(false);
-                let vector_count = data.get("vector_count").and_then(Value::as_u64).unwrap_or(0);
+                let indexed = data
+                    .get("indexed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let vector_count = data
+                    .get("vector_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 let indexed_here = indexed && vector_count > 0;
                 let local_on = indexed_here && p.local;
                 let cloud_on = indexed_here && p.cloud;
@@ -481,8 +475,14 @@ async fn print_cli_list_banner(
         let inner = pack_bracket_inner(p, reg, home_canon);
         let name_bracket = term::bracketed_cyan(c, &inner);
         let tags = if let Ok(data) = status(cfg, Some(&p.path)).await {
-            let indexed = data.get("indexed").and_then(Value::as_bool).unwrap_or(false);
-            let vector_count = data.get("vector_count").and_then(Value::as_u64).unwrap_or(0);
+            let indexed = data
+                .get("indexed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let vector_count = data
+                .get("vector_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             let indexed_here = indexed && vector_count > 0;
             let local_on = indexed_here && p.local;
             let cloud_on = indexed_here && p.cloud;
@@ -501,18 +501,30 @@ async fn print_cli_list_banner(
 }
 
 pub fn print_status(data: &Value) {
-    let pack_path = data
-        .get("pack_path")
-        .and_then(Value::as_str)
-        .unwrap_or("?");
-    let indexed = data.get("indexed").and_then(Value::as_bool).unwrap_or(false);
-    let vector_count = data.get("vector_count").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let pack_path = data.get("pack_path").and_then(Value::as_str).unwrap_or("?");
+    let indexed = data
+        .get("indexed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let vector_count = data
+        .get("vector_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
     let entities = data.get("entities").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let relationships = data.get("relationships").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let relationships = data
+        .get("relationships")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
     let file_tree_raw = data.get("file_tree").and_then(Value::as_str).unwrap_or("");
     let file_tree = user_facing_file_tree(file_tree_raw);
-    let pending_removal = data.get("pending_removal").and_then(Value::as_bool).unwrap_or(false);
-    let pending_add = data.get("pending_add").and_then(Value::as_bool).unwrap_or(false);
+    let pending_removal = data
+        .get("pending_removal")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let pending_add = data
+        .get("pending_add")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let jobs = data.get("jobs").and_then(Value::as_object);
     let active_val = jobs.and_then(|j| {
         if j.contains_key("active_for_this_pack") {
@@ -535,10 +547,21 @@ pub fn print_status(data: &Value) {
         })
         .map(|a| a.as_slice())
         .unwrap_or(&[]);
-    let queued_jobs = jobs.and_then(|j| j.get("queued_jobs")).and_then(Value::as_array).map(|a| a.as_slice()).unwrap_or(&[]);
-    let last_job = jobs.and_then(|j| j.get("last_completed")).and_then(Value::as_object);
-    let last_job_failed = last_job.and_then(|j| j.get("state")).and_then(Value::as_str) == Some("Failed");
-    let last_job_error = last_job.and_then(|j| j.get("error")).and_then(Value::as_str);
+    let queued_jobs = jobs
+        .and_then(|j| j.get("queued_jobs"))
+        .and_then(Value::as_array)
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
+    let last_job = jobs
+        .and_then(|j| j.get("last_completed"))
+        .and_then(Value::as_object);
+    let last_job_failed = last_job
+        .and_then(|j| j.get("state"))
+        .and_then(Value::as_str)
+        == Some("Failed");
+    let last_job_error = last_job
+        .and_then(|j| j.get("error"))
+        .and_then(Value::as_str);
     let last_job_id = last_job.and_then(|j| j.get("id")).and_then(Value::as_str);
     let source_root_paths: Vec<String> = data
         .get("source_root_paths")
@@ -597,10 +620,7 @@ pub fn print_status(data: &Value) {
                 );
             }
         } else if indexed {
-            println!(
-                "{} successfully indexed",
-                term::bold_green(c, pack_path)
-            );
+            println!("{} successfully indexed", term::bold_green(c, pack_path));
         } else {
             println!("{} not indexed", term::bold_yellow(c, pack_path));
         }
@@ -610,10 +630,7 @@ pub fn print_status(data: &Value) {
             println!("{}", term::dimmed_word(c, &file_tree));
         }
         println!();
-        println!(
-            "{} vector entries",
-            term::data_num(c, vector_count)
-        );
+        println!("{} vector entries", term::data_num(c, vector_count));
         println!(
             "{} entities, {} relationships",
             term::data_num(c, entities),
@@ -709,11 +726,7 @@ pub fn print_status(data: &Value) {
     }
 }
 
-pub async fn list(
-    cfg: &ServerConfig,
-    output_json: bool,
-    kind: ListOutputKind,
-) -> Result<Value> {
+pub async fn list(cfg: &ServerConfig, output_json: bool, kind: ListOutputKind) -> Result<Value> {
     let _ = crate::registry::ensure_default_if_unset();
     let reg = crate::registry::load_registry().unwrap_or_default();
     let home_canon = dirs::home_dir().and_then(|h| h.canonicalize().ok());
@@ -763,14 +776,23 @@ pub async fn list(
             let inner = pack_bracket_inner(p, &reg, &home_canon);
             let name_bracket = term::bracketed_cyan(c, &inner);
             if let Ok(data) = status(cfg, Some(&p.path)).await {
-                let indexed = data.get("indexed").and_then(Value::as_bool).unwrap_or(false);
-                let vector_count = data.get("vector_count").and_then(Value::as_u64).unwrap_or(0);
+                let indexed = data
+                    .get("indexed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let vector_count = data
+                    .get("vector_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 let indexed_here = indexed && vector_count > 0;
                 let local_on = indexed_here && p.local;
                 let cloud_on = indexed_here && p.cloud;
                 let tags = bracket_local_cloud(c, local_on, cloud_on);
                 println!("{}{} {}", line_prefix, name_bracket, tags);
-                let pending_add = data.get("pending_add").and_then(Value::as_bool).unwrap_or(false);
+                let pending_add = data
+                    .get("pending_add")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let jobs = data.get("jobs").and_then(Value::as_object);
                 let active_val = jobs.and_then(|j| {
                     if j.contains_key("active_for_this_pack") {
@@ -796,8 +818,10 @@ pub async fn list(
                     .unwrap_or(&[]);
                 let active_obj_early = active_val.and_then(Value::as_object);
                 let pack_path_str = p.path.as_str();
-                let mut show_removing =
-                    data.get("pending_removal").and_then(Value::as_bool).unwrap_or(false);
+                let mut show_removing = data
+                    .get("pending_removal")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 if !show_removing {
                     let remove_for_pack = |j: &Value| {
                         j.get("job_type").and_then(Value::as_str) == Some("remove_pack")
@@ -826,10 +850,19 @@ pub async fn list(
                         println!("    - {} removing...", path_display);
                     }
                 }
-                let indexed = data.get("indexed").and_then(Value::as_bool).unwrap_or(false);
-                let vector_count = data.get("vector_count").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let indexed = data
+                    .get("indexed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let vector_count = data
+                    .get("vector_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
                 let entities = data.get("entities").and_then(Value::as_u64).unwrap_or(0) as usize;
-                let relationships = data.get("relationships").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let relationships = data
+                    .get("relationships")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
                 let counts_suffix = format!(
                     "{} vectors, {} entities, {} relationships",
                     vector_count, entities, relationships
@@ -859,10 +892,7 @@ pub async fn list(
                             if print_indexing_lines_from_job(c, av, "indexing...") {
                                 printed = true;
                             } else {
-                                let id = av
-                                    .get("id")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("?");
+                                let id = av.get("id").and_then(Value::as_str).unwrap_or("?");
                                 if c {
                                     println!(
                                         "    - {} {}",
@@ -959,7 +989,10 @@ pub async fn remove(cfg: &ServerConfig, path: &str) -> Result<Value> {
     let body = resp.text().await?;
     if !status.is_success() {
         let msg = if body.is_empty() {
-            format!("remove request failed: HTTP {} (empty response). If you recently updated, try stopping any running mk server and run the command again.", status.as_u16())
+            format!(
+                "remove request failed: HTTP {} (empty response). If you recently updated, try stopping any running mk server and run the command again.",
+                status.as_u16()
+            )
         } else {
             format!("remove request failed: {}", body)
         };
@@ -1059,12 +1092,19 @@ pub async fn add(cfg: &ServerConfig, body: &serde_json::Value) -> Result<Value> 
     let resp_body = resp.text().await?;
     if !status.is_success() {
         if let Ok(err_json) = serde_json::from_str::<Value>(&resp_body) {
-            if let Some(msg) = err_json.get("error").and_then(|e| e.get("message")).and_then(Value::as_str) {
+            if let Some(msg) = err_json
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+            {
                 return Err(anyhow!("add request failed: {}", msg));
             }
         }
         if resp_body.is_empty() {
-            return Err(anyhow!("add request failed: HTTP {} (empty response)", status.as_u16()));
+            return Err(anyhow!(
+                "add request failed: HTTP {} (empty response)",
+                status.as_u16()
+            ));
         }
         return Err(anyhow!("add request failed: {}", resp_body));
     }
@@ -1074,7 +1114,11 @@ pub async fn add(cfg: &ServerConfig, body: &serde_json::Value) -> Result<Value> 
 /// Print add result: "Added N chunks." when synchronous success, or "Adding (job-N)..." when async job.
 pub fn print_add_started(data: &Value, pack_path: &str) {
     let c = term::color_stdout();
-    if let Some(n) = data.get("result").and_then(|r| r.get("chunks_added")).and_then(Value::as_u64) {
+    if let Some(n) = data
+        .get("result")
+        .and_then(|r| r.get("chunks_added"))
+        .and_then(Value::as_u64)
+    {
         println!(
             "{} {}",
             term::success_words(c, "Added"),
@@ -1082,7 +1126,11 @@ pub fn print_add_started(data: &Value, pack_path: &str) {
         );
         return;
     }
-    if let Some(job_id) = data.get("job").and_then(|j| j.get("id")).and_then(Value::as_str) {
+    if let Some(job_id) = data
+        .get("job")
+        .and_then(|j| j.get("id"))
+        .and_then(Value::as_str)
+    {
         println!(
             "{} ({}). Run 'mk status {}' to check progress.",
             term::success_words(c, "Adding"),

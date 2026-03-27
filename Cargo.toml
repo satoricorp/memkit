@@ -7,6 +7,10 @@ edition = "2024"
 name = "mk"
 path = "src/main.rs"
 
+[[bin]]
+name = "memkit-server"
+path = "src/bin/memkit-server.rs"
+
 [features]
 default = ["store-helix-only"]
 llama-embedded = ["dep:llama-cpp-2", "dep:encoding_rs"]
@@ -26,10 +30,12 @@ colored_json = "5"
 owo-colors = { version = "4", features = ["supports-colors"] }
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
+convex = "0.10"
 dirs = "6"
 dotenvy = "0.15"
 fs2 = "0.4"
 fastembed = "5"
+flate2 = "1"
 glob = "0.3"
 litchi = "0.0.1"
 llama-cpp-2 = { version = "0.1.138", optional = true }
@@ -40,6 +46,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
+tar = "0.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"

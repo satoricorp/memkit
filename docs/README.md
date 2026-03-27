@@ -6,6 +6,8 @@
 | [../spec.md](../spec.md) | Product spec (if present) |
 | [../CONTEXT.md](../CONTEXT.md) | Agent / JSON CLI usage |
 | [llm-configuration.md](llm-configuration.md) | LLM and model precedence |
+| [deployment-secrets.md](deployment-secrets.md) | Local vs deployed handling for Google service-account secrets |
+| [google-auth-roadmap.md](google-auth-roadmap.md) | Google Docs/Sheets auth direction for OSS vs hosted |
 | [helix-hot-paths.md](helix-hot-paths.md) | Notes on Helix load / `/status` cost |
 | [../benchmarks/BENCHMARKS.md](../benchmarks/BENCHMARKS.md) | Benchmarks and profiling notes |
 

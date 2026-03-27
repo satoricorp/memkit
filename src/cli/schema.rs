@@ -5,19 +5,8 @@ use owo_colors::OwoColorize;
 use serde_json::json;
 
 pub const SCHEMA_COMMANDS: &[&str] = &[
-    "add",
-    "remove",
-    "status",
-    "query",
-    "publish",
-    "use",
-    "list",
-    "doctor",
-    "schema",
-    "start",
-    "stop",
-    "help",
-    "version",
+    "add", "remove", "status", "query", "publish", "login", "logout", "whoami", "use", "list",
+    "doctor", "schema", "start", "stop", "help", "version",
 ];
 
 /// Global flags (see `parse_global_flags` in `main.rs`); may appear anywhere in argv.
@@ -69,12 +58,30 @@ fn examples_for_command(cmd: &str) -> serde_json::Value {
             ],
         ),
         "query" => example_list(
-            &["mk query \"how does auth work\" --top-k 12 --no-rerank --pack mypack --raw --output json"],
-            &["mk -j '{\"command\":\"query\",\"query\":\"how does auth work\",\"top_k\":8,\"use_reranker\":true,\"raw\":false,\"pack\":\"./memory-pack\"}'"],
+            &[
+                "mk query \"how does auth work\" --top-k 12 --no-rerank --pack mypack --raw --output json",
+            ],
+            &[
+                "mk -j '{\"command\":\"query\",\"query\":\"how does auth work\",\"top_k\":8,\"use_reranker\":true,\"raw\":false,\"pack\":\"./memory-pack\"}'",
+            ],
         ),
         "publish" => example_list(
             &["mk publish --pack ./memory-pack --destination s3://bucket/prefix"],
-            &["mk -j '{\"command\":\"publish\",\"pack\":\"./memory-pack\",\"destination\":\"s3://bucket/prefix\"}'"],
+            &[
+                "mk -j '{\"command\":\"publish\",\"pack\":\"./memory-pack\",\"destination\":\"s3://bucket/prefix\"}'",
+            ],
+        ),
+        "login" => example_list(
+            &["mk login", "mk login --output json"],
+            &["mk -j '{\"command\":\"login\"}'"],
+        ),
+        "logout" => example_list(
+            &["mk logout", "mk logout --output json"],
+            &["mk -j '{\"command\":\"logout\"}'"],
+        ),
+        "whoami" => example_list(
+            &["mk whoami", "mk whoami --output json"],
+            &["mk -j '{\"command\":\"whoami\"}'"],
         ),
         "use" => example_list(
             &["mk use pack ./memory-pack", "mk use model openai:gpt-4"],
@@ -97,7 +104,9 @@ fn examples_for_command(cmd: &str) -> serde_json::Value {
         ),
         "start" => example_list(
             &["mk start --pack ./memory-pack --host 127.0.0.1 --port 4242 --foreground"],
-            &["mk -j '{\"command\":\"start\",\"pack\":\"./memory-pack\",\"host\":\"127.0.0.1\",\"port\":4242,\"foreground\":true}'"],
+            &[
+                "mk -j '{\"command\":\"start\",\"pack\":\"./memory-pack\",\"host\":\"127.0.0.1\",\"port\":4242,\"foreground\":true}'",
+            ],
         ),
         "stop" => example_list(
             &["mk stop --port 4242"],
@@ -136,7 +145,10 @@ fn attach_examples(cmd: &str, mut schema: serde_json::Value) -> serde_json::Valu
     schema
 }
 
-fn json_schema_attach_examples(mut schema: serde_json::Value, example_instances: Vec<serde_json::Value>) -> serde_json::Value {
+fn json_schema_attach_examples(
+    mut schema: serde_json::Value,
+    example_instances: Vec<serde_json::Value>,
+) -> serde_json::Value {
     if let Some(o) = schema.as_object_mut() {
         o.insert("examples".to_string(), json!(example_instances));
     }
@@ -214,6 +226,33 @@ pub fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                     "path": {"type": "string", "description": "Alias for pack"},
                     "destination": {"type": "string", "description": "e.g. s3://bucket/prefix"}
                 }
+            }
+        }),
+        "login" => serde_json::json!({
+            "command": "login",
+            "input": {},
+            "output": {
+                "authenticated": "boolean",
+                "profile": "object | null",
+                "jwtExpiresAt": "string | null"
+            }
+        }),
+        "logout" => serde_json::json!({
+            "command": "logout",
+            "input": {},
+            "output": {
+                "authenticated": "boolean",
+                "logged_out": "boolean"
+            }
+        }),
+        "whoami" => serde_json::json!({
+            "command": "whoami",
+            "input": {},
+            "output": {
+                "authenticated": "boolean",
+                "profile": "object | null",
+                "jwtExpiresAt": "string | null",
+                "refresh_error": "string | null"
             }
         }),
         "use" => serde_json::json!({
@@ -294,7 +333,8 @@ pub fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
 }
 
 fn print_value_as_yaml(value: &serde_json::Value) -> Result<()> {
-    let yaml = serde_yaml::to_string(value).map_err(|e| anyhow!("serialize schema as YAML: {}", e))?;
+    let yaml =
+        serde_yaml::to_string(value).map_err(|e| anyhow!("serialize schema as YAML: {}", e))?;
     let trimmed = yaml.trim_end();
     println!(
         "{}",
@@ -391,6 +431,33 @@ fn input_json_schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                 "destination": "s3://bucket/prefix"
             })],
         ),
+        "login" => json_schema_attach_examples(
+            json!({
+                "$schema": schema_uri,
+                "title": "mk login (JSON input)",
+                "type": "object",
+                "properties": {}
+            }),
+            vec![json!({})],
+        ),
+        "logout" => json_schema_attach_examples(
+            json!({
+                "$schema": schema_uri,
+                "title": "mk logout (JSON input)",
+                "type": "object",
+                "properties": {}
+            }),
+            vec![json!({})],
+        ),
+        "whoami" => json_schema_attach_examples(
+            json!({
+                "$schema": schema_uri,
+                "title": "mk whoami (JSON input)",
+                "type": "object",
+                "properties": {}
+            }),
+            vec![json!({})],
+        ),
         "use" => json_schema_attach_examples(
             json!({
                 "$schema": schema_uri,
@@ -434,7 +501,10 @@ fn input_json_schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                     "schema": { "type": "string", "description": "Subcommand to introspect" }
                 }
             }),
-            vec![json!({ "format": "json-schema", "schema": "query" }), json!({})],
+            vec![
+                json!({ "format": "json-schema", "schema": "query" }),
+                json!({}),
+            ],
         ),
         "start" => json_schema_attach_examples(
             json!({
@@ -503,14 +573,22 @@ pub fn print_schema(cmd: Option<&str>, format: SchemaFormat) -> Result<()> {
             if let Some(schema) = schema_for_command(c) {
                 print_value_as_yaml(&schema)?;
             } else {
-                anyhow::bail!("unknown schema: {}. available: {}", c, SCHEMA_COMMANDS.join(", "));
+                anyhow::bail!(
+                    "unknown schema: {}. available: {}",
+                    c,
+                    SCHEMA_COMMANDS.join(", ")
+                );
             }
         }
         (Some(c), SchemaFormat::JsonSchema) => {
             if let Some(schema) = input_json_schema_for_command(c) {
                 print_value_as_yaml(&schema)?;
             } else {
-                anyhow::bail!("unknown schema: {}. available: {}", c, SCHEMA_COMMANDS.join(", "));
+                anyhow::bail!(
+                    "unknown schema: {}. available: {}",
+                    c,
+                    SCHEMA_COMMANDS.join(", ")
+                );
             }
         }
     }

@@ -42,4 +42,22 @@ export default defineSchema({
   })
     .index("by_org_id", ["org_id"])
     .index("by_api_key_hash", ["api_key_hash"]),
+  cliLoginGrants: defineTable({
+    code_hash: v.string(),
+    user_id: v.id("users"),
+    expiration_time: v.number(),
+    used_time: v.optional(v.number()),
+    created_at: v.string(),
+  }).index("by_code_hash", ["code_hash"]),
+  cliSessions: defineTable({
+    token_hash: v.string(),
+    user_id: v.id("users"),
+    expiration_time: v.number(),
+    last_used_time: v.number(),
+    revoked_time: v.optional(v.number()),
+    created_at: v.string(),
+    updated_at: v.string(),
+  })
+    .index("by_token_hash", ["token_hash"])
+    .index("by_user_id", ["user_id"]),
 });

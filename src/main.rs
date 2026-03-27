@@ -1,16 +1,15 @@
 mod add_docs;
+mod auth;
 mod cli;
 mod cli_client;
+mod cloud;
 mod config;
-#[cfg(feature = "helix")]
-mod helix_store;
+mod embed;
 mod extract;
 mod file_tree;
-mod registry;
-mod validate;
-mod embed;
-mod term;
 mod google;
+#[cfg(feature = "helix")]
+mod helix_store;
 mod indexer;
 mod ontology;
 #[cfg(feature = "llama-embedded")]
@@ -20,14 +19,17 @@ mod pack_location;
 mod publish;
 mod query;
 mod query_synth;
+mod registry;
 mod rerank;
 mod server;
+mod term;
 mod types;
+mod validate;
 
+use anyhow::{Context, Result, anyhow};
 use std::env;
 use std::path::PathBuf;
 use std::str::FromStr;
-use anyhow::{Context, Result, anyhow};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {
@@ -116,7 +118,11 @@ fn wrap_retrieval_preview(s: &str, width: usize, max_chars: usize) -> String {
         }
         out.push_str(indent);
         out.push_str(&remaining.chars().take(width).collect::<String>());
-        remaining = &remaining[remaining.char_indices().nth(take).map(|(i, _)| i).unwrap_or(remaining.len())..];
+        remaining = &remaining[remaining
+            .char_indices()
+            .nth(take)
+            .map(|(i, _)| i)
+            .unwrap_or(remaining.len())..];
     }
     out
 }
@@ -236,9 +242,7 @@ fn resolve_pack_root(pack_arg: Option<&str>) -> Result<PathBuf> {
             return Ok(home);
         }
     }
-    anyhow::bail!(
-        "no memory pack found. use --pack <name-or-path> or run `mk add <path>` first"
-    )
+    anyhow::bail!("no memory pack found. use --pack <name-or-path> or run `mk add <path>` first")
 }
 
 /// Create a default memory pack in the home directory (~/.memkit) with a generated name (e.g. for first-time add).
@@ -253,7 +257,11 @@ fn create_default_pack() -> Result<PathBuf> {
         .to_string_lossy()
         .to_string();
     let reg = load_registry().unwrap_or_default();
-    ensure_registered(&normalized, Some("default".to_string()), reg.packs.is_empty())?;
+    ensure_registered(
+        &normalized,
+        Some("default".to_string()),
+        reg.packs.is_empty(),
+    )?;
     Ok(home)
 }
 
@@ -314,7 +322,9 @@ fn parse_use_field_json(v: Option<&serde_json::Value>) -> Result<UseField> {
 
 /// `{"command":"use"}` with optional `"pack"` / `"model"` (null = show, string = set).
 fn cli_use_from_json(j: &serde_json::Value) -> Result<CliCommand> {
-    let obj = j.as_object().ok_or_else(|| anyhow!("--json must be a JSON object"))?;
+    let obj = j
+        .as_object()
+        .ok_or_else(|| anyhow!("--json must be a JSON object"))?;
     let has_pack = obj.contains_key("pack");
     let has_model = obj.contains_key("model");
     if !has_pack && !has_model {
@@ -353,7 +363,10 @@ fn has_any_flag(args: &[String], flags: &[&str]) -> bool {
 }
 
 fn parse_headless_start(args: &[String]) -> Result<Option<ServeConfig>> {
-    let is_headless = args.first().map(|a| a == "--headless-start").unwrap_or(false);
+    let is_headless = args
+        .first()
+        .map(|a| a == "--headless-start")
+        .unwrap_or(false);
     if !is_headless {
         return Ok(None);
     }
@@ -422,23 +435,48 @@ fn doc_type_for_url(url: &str) -> &'static str {
 }
 
 fn parse_add_command(j: &serde_json::Value, pack_override: Option<String>) -> Result<CliCommand> {
-    let obj = j.as_object().ok_or_else(|| anyhow!("--json must be a JSON object"))?;
-    let get_str = |k: &str| obj.get(k).and_then(serde_json::Value::as_str).map(String::from);
-    let has_docs = j.get("documents").and_then(serde_json::Value::as_array).map(|a| !a.is_empty()).unwrap_or(false);
-    let has_conv = j.get("conversation").and_then(serde_json::Value::as_array).map(|a| !a.is_empty()).unwrap_or(false);
+    let obj = j
+        .as_object()
+        .ok_or_else(|| anyhow!("--json must be a JSON object"))?;
+    let get_str = |k: &str| {
+        obj.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(String::from)
+    };
+    let has_docs = j
+        .get("documents")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    let has_conv = j
+        .get("conversation")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
     if has_docs || has_conv {
-        for doc in j.get("documents").and_then(serde_json::Value::as_array).into_iter().flatten() {
+        for doc in j
+            .get("documents")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             if let Some(v) = doc.get("value").and_then(serde_json::Value::as_str) {
                 crate::validate::reject_control_chars(v)?;
             }
         }
         return Ok(CliCommand::Add {
             local_path: None,
-            pack: pack_override.or_else(|| get_str("pack")).or_else(|| get_str("path")),
+            pack: pack_override
+                .or_else(|| get_str("pack"))
+                .or_else(|| get_str("path")),
             api_request: Some(j.clone()),
         });
     }
-    let path = get_str("path").ok_or_else(|| anyhow!("--json must include \"path\" (local path) or \"documents\"/\"conversation\" (API add)"))?;
+    let path = get_str("path").ok_or_else(|| {
+        anyhow!(
+            "--json must include \"path\" (local path) or \"documents\"/\"conversation\" (API add)"
+        )
+    })?;
     crate::validate::validate_path(&path)?;
     Ok(CliCommand::Add {
         local_path: Some(path),
@@ -449,8 +487,14 @@ fn parse_add_command(j: &serde_json::Value, pack_override: Option<String>) -> Re
 
 /// Build a CliCommand from a single JSON object (used for `mk --json '{...}'`).
 fn cli_command_from_json(cmd: &str, j: &serde_json::Value) -> Result<CliCommand> {
-    let obj = j.as_object().ok_or_else(|| anyhow!("--json must be a JSON object"))?;
-    let get_str = |k: &str| obj.get(k).and_then(serde_json::Value::as_str).map(String::from);
+    let obj = j
+        .as_object()
+        .ok_or_else(|| anyhow!("--json must be a JSON object"))?;
+    let get_str = |k: &str| {
+        obj.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(String::from)
+    };
     let get_u64 = |k: &str| obj.get(k).and_then(serde_json::Value::as_u64);
     let get_bool = |k: &str| obj.get(k).and_then(serde_json::Value::as_bool);
 
@@ -478,12 +522,21 @@ fn cli_command_from_json(cmd: &str, j: &serde_json::Value) -> Result<CliCommand>
             let use_reranker = get_bool("use_reranker").unwrap_or(true);
             let raw = get_bool("raw").unwrap_or(false);
             let pack = get_str("pack");
-            Ok(CliCommand::Query { query, top_k, use_reranker, raw, pack })
+            Ok(CliCommand::Query {
+                query,
+                top_k,
+                use_reranker,
+                raw,
+                pack,
+            })
         }
         "publish" => Ok(CliCommand::Publish {
             pack: get_str("pack").or_else(|| get_str("path")),
             destination: get_str("destination"),
         }),
+        "login" => Ok(CliCommand::Login),
+        "logout" => Ok(CliCommand::Logout),
+        "whoami" => Ok(CliCommand::WhoAmI),
         "schema" => {
             let format = match get_str("format") {
                 Some(f) => crate::cli::schema::schema_format_from_str(&f)?,
@@ -519,7 +572,10 @@ fn cli_command_from_json(cmd: &str, j: &serde_json::Value) -> Result<CliCommand>
         "doctor" => Ok(CliCommand::Doctor),
         "version" => Ok(CliCommand::Version),
         "help" | "--help" | "-h" => Ok(CliCommand::Help),
-        other => Err(anyhow!("unknown command: {}. run `mk help` for usage", other)),
+        other => Err(anyhow!(
+            "unknown command: {}. run `mk help` for usage",
+            other
+        )),
     }
 }
 
@@ -626,7 +682,9 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
                     }
                     "--top-k" => {
                         i += 1;
-                        let v = rest.get(i).ok_or_else(|| anyhow!("missing value for --top-k"))?;
+                        let v = rest
+                            .get(i)
+                            .ok_or_else(|| anyhow!("missing value for --top-k"))?;
                         top_k = v
                             .parse::<usize>()
                             .map_err(|_| anyhow!("invalid --top-k value: {}", v))?;
@@ -654,6 +712,9 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
             let destination = flag_value(rest, "--destination");
             Ok(CliCommand::Publish { pack, destination })
         }
+        "login" => Ok(CliCommand::Login),
+        "logout" => Ok(CliCommand::Logout),
+        "whoami" => Ok(CliCommand::WhoAmI),
         "schema" => {
             let rest = &args[1..];
             let mut format = crate::cli::schema::SchemaFormat::Memkit;
@@ -667,9 +728,7 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
         }
         "use" => {
             let rest = &args[1..];
-            if rest.is_empty()
-                || (rest.len() == 1 && matches!(rest[0].as_str(), "--help" | "-h"))
-            {
+            if rest.is_empty() || (rest.len() == 1 && matches!(rest[0].as_str(), "--help" | "-h")) {
                 return Ok(CliCommand::Help);
             }
             if rest.len() != 2 {
@@ -697,14 +756,25 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
             let pack = flag_value(&args[1..], "--pack");
             let host = flag_value(&args[1..], "--host");
             let port = flag_value(&args[1..], "--port")
-                .map(|v| v.parse::<u16>().map_err(|_| anyhow!("invalid --port value")))
+                .map(|v| {
+                    v.parse::<u16>()
+                        .map_err(|_| anyhow!("invalid --port value"))
+                })
                 .transpose()?;
             let foreground = has_any_flag(&args[1..], &["--foreground"]);
-            Ok(CliCommand::Serve { pack, host, port, foreground })
+            Ok(CliCommand::Serve {
+                pack,
+                host,
+                port,
+                foreground,
+            })
         }
         "stop" => {
             let port = flag_value(&args[1..], "--port")
-                .map(|v| v.parse::<u16>().map_err(|_| anyhow!("invalid --port value")))
+                .map(|v| {
+                    v.parse::<u16>()
+                        .map_err(|_| anyhow!("invalid --port value"))
+                })
                 .transpose()?;
             Ok(CliCommand::Stop { port })
         }
@@ -731,7 +801,12 @@ fn run_use(spec: &UseSpec) -> Result<()> {
             if let Some(ref default_path) = reg.default_path {
                 let default_pack = reg.packs.iter().find(|p| p.path == *default_path);
                 let (name, path) = default_pack
-                    .map(|p| (p.name.as_deref().unwrap_or(p.path.as_str()), p.path.as_str()))
+                    .map(|p| {
+                        (
+                            p.name.as_deref().unwrap_or(p.path.as_str()),
+                            p.path.as_str(),
+                        )
+                    })
                     .unwrap_or((default_path.as_str(), default_path.as_str()));
                 println!(
                     "{} {}  {}",
@@ -818,10 +893,7 @@ fn print_models_section() {
     println!();
     println!(
         "  {}",
-        crate::term::dimmed_word(
-            c,
-            "Run 'mk use model <id>' to set a default model."
-        )
+        crate::term::dimmed_word(c, "Run 'mk use model <id>' to set a default model.")
     );
 }
 
@@ -848,7 +920,10 @@ fn print_help() {
     println!();
     println!(
         "  {}",
-        crate::term::dimmed_word(c, "Global flags: [--output json|text] [--dry-run] [--version | -V]")
+        crate::term::dimmed_word(
+            c,
+            "Global flags: [--output json|text] [--dry-run] [--version | -V]"
+        )
     );
     println!();
     println!("  {}", crate::term::section_title(c, "Agents"));
@@ -857,7 +932,10 @@ fn print_help() {
         crate::term::dimmed_word(c, "Agent JSON:"),
         crate::term::mk_binary(c),
         crate::term::bold_word(c, "-j"),
-        crate::term::dimmed_word(c, " '<JSON>'  (same as --json / --mjson; object must include \"command\")")
+        crate::term::dimmed_word(
+            c,
+            " '<JSON>'  (same as --json / --mjson; object must include \"command\")"
+        )
     );
     println!();
     print_help_section(c, "Storage", true);
@@ -887,11 +965,23 @@ fn print_help() {
     );
     print_help_cmd_line_grouped(c, "use pack", " <name-or-path>   (set default pack)");
     print_help_cmd_line_grouped(c, "use model", " <model-id>   (set default model)");
+    print_help_section(c, "Auth", false);
+    print_help_cmd_line_grouped(c, "login", "   (browser sign-in via MEMKIT_AUTH_BASE_URL)");
+    print_help_cmd_line_grouped(c, "logout", "   (clear local auth + revoke remote session)");
+    print_help_cmd_line_grouped(c, "whoami", "   (show current auth profile + JWT status)");
     print_help_section(c, "Server", false);
-    print_help_cmd_line_grouped(c, "start", " [--pack <path>] [--host H] [--port P] [--foreground]");
+    print_help_cmd_line_grouped(
+        c,
+        "start",
+        " [--pack <path>] [--host H] [--port P] [--foreground]",
+    );
     print_help_cmd_line_grouped(c, "stop", " [--port P]");
     print_help_section(c, "Diagnostics & Schemas", false);
-    print_help_cmd_line_grouped(c, "doctor", "   (config path + server /health reachability)");
+    print_help_cmd_line_grouped(
+        c,
+        "doctor",
+        "   (config path + server /health reachability)",
+    );
     print_help_cmd_line_grouped(c, "schema", " [--format json|json-schema] [command]");
 }
 
@@ -899,21 +989,125 @@ fn print_version() {
     println!("memkit {}", crate::term::BUILD_VERSION);
 }
 
-/// If dotenvy failed to set MEMKIT_GOOGLE_SERVICE_ACCOUNT_JSON (e.g. value has newlines), try loading
-/// it from .env manually: find MEMKIT_GOOGLE_SERVICE_ACCOUNT_JSON= and parse the value (stop at next
-/// KEY= or end of file; strip surrounding quotes). Tries current_dir(), then executable's directory
-/// and parents, then ~/.memkit/.env.
-fn load_memkit_google_json_from_dotenv_fallback() {
-    if std::env::var("MEMKIT_GOOGLE_SERVICE_ACCOUNT_JSON").is_ok() {
-        return;
+fn profile_label(profile: &crate::config::AuthProfile) -> String {
+    match (&profile.name, &profile.email) {
+        (Some(name), Some(email)) if !name.is_empty() && !email.is_empty() => {
+            format!("{} <{}>", name, email)
+        }
+        (_, Some(email)) if !email.is_empty() => email.clone(),
+        (Some(name), _) if !name.is_empty() => name.clone(),
+        _ => "unknown user".to_string(),
     }
-    const PREFIX: &str = "MEMKIT_GOOGLE_SERVICE_ACCOUNT_JSON=";
+}
 
-    /// Extract value after PREFIX: stop at next line that looks like VAR= so we don't pull in the next env entry.
-    fn extract_value(content: &str, after_prefix: usize) -> &str {
+fn print_login_text(out: &serde_json::Value) {
+    let c = crate::term::color_stdout();
+    if let Some(profile_value) = out.get("profile") {
+        if let Ok(profile) =
+            serde_json::from_value::<crate::config::AuthProfile>(profile_value.clone())
+        {
+            println!(
+                "{} {}",
+                crate::term::style_stdout("Signed in as", |s| s.green().to_string()),
+                profile_label(&profile)
+            );
+            if let Some(exp) = out.get("jwtExpiresAt").and_then(serde_json::Value::as_str) {
+                println!(
+                    "{} {}",
+                    crate::term::style_stdout("JWT expires at", |s| s.dimmed().to_string()),
+                    crate::term::bracketed_cyan(c, exp)
+                );
+            }
+        }
+    }
+}
+
+fn print_logout_text(out: &serde_json::Value) {
+    let had_session = out
+        .get("logged_out")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if had_session {
+        println!(
+            "{}",
+            crate::term::style_stdout("Signed out.", |s| s.green().to_string())
+        );
+    } else {
+        println!(
+            "{}",
+            crate::term::style_stdout("Not signed in.", |s| s.dimmed().to_string())
+        );
+    }
+}
+
+fn print_whoami_text(out: &crate::auth::WhoAmIResponse) {
+    let c = crate::term::color_stdout();
+    if out.authenticated {
+        if let Some(ref profile) = out.profile {
+            println!(
+                "{} {}",
+                crate::term::style_stdout("Signed in as", |s| s.green().to_string()),
+                profile_label(profile)
+            );
+        } else {
+            println!(
+                "{}",
+                crate::term::style_stdout("Signed in.", |s| s.green().to_string())
+            );
+        }
+    } else {
+        println!(
+            "{}",
+            crate::term::style_stdout("Not signed in.", |s| s.yellow().to_string())
+        );
+        if let Some(ref profile) = out.profile {
+            println!(
+                "{} {}",
+                crate::term::style_stdout("Cached profile", |s| s.dimmed().to_string()),
+                profile_label(profile)
+            );
+        }
+    }
+    if let Some(ref exp) = out.jwt_expires_at {
+        println!(
+            "{} {}",
+            crate::term::style_stdout("JWT expires at", |s| s.dimmed().to_string()),
+            crate::term::bracketed_cyan(c, exp)
+        );
+    }
+}
+
+/// If dotenvy fails to load a complex `.env` entry (for example a large inline JSON payload),
+/// salvage the file manually so later variables such as MEMKIT_AUTH_BASE_URL still load.
+/// Existing process env vars always win.
+fn load_env_file_fallback() {
+    fn parse_key(line: &str) -> Option<(usize, &str)> {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return None;
+        }
+
+        let offset = line.len() - trimmed.len();
+        let trimmed = if trimmed.strip_prefix("export ").is_some() {
+            offset + "export ".len()
+        } else {
+            offset
+        };
+        let candidate = &line[trimmed..];
+        let key_len = candidate
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .count();
+        if key_len == 0 || candidate.chars().nth(key_len) != Some('=') {
+            return None;
+        }
+        Some((trimmed, &candidate[..key_len]))
+    }
+
+    fn extract_multiline_value(content: &str, after_prefix: usize) -> (&str, usize) {
         let rest = content[after_prefix..].trim_start();
         if rest.is_empty() {
-            return rest;
+            return (rest, 0);
         }
         let lines: Vec<&str> = rest.split('\n').collect();
         let mut value_end = rest.len();
@@ -921,24 +1115,69 @@ fn load_memkit_google_json_from_dotenv_fallback() {
         for (i, line) in lines.iter().enumerate() {
             if i >= 1 {
                 let trimmed = line.trim_start();
-                if !trimmed.is_empty() {
-                    if let Some(first) = trimmed.chars().next() {
-                        if first.is_ascii_alphabetic() || first == '_' {
-                            let key_len = trimmed
-                                .chars()
-                                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                                .count();
-                            if key_len > 0 && trimmed.chars().nth(key_len) == Some('=') {
-                                value_end = offset;
-                                break;
-                            }
-                        }
+                if let Some(first) = trimmed.chars().next() {
+                    if (first.is_ascii_alphabetic() || first == '_') && parse_key(trimmed).is_some() {
+                        value_end = offset;
+                        break;
                     }
                 }
             }
             offset += line.len() + 1;
         }
-        rest[..value_end.min(rest.len())].trim_end()
+        let value = rest[..value_end.min(rest.len())].trim_end();
+        (value, rest[..value_end.min(rest.len())].len())
+    }
+
+    fn decode_value(raw: &str) -> String {
+        let trimmed = raw.trim();
+        if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+            serde_json::from_str::<String>(trimmed)
+                .unwrap_or_else(|_| trimmed[1..trimmed.len() - 1].replace("\\\"", "\""))
+        } else if trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2 {
+            trimmed[1..trimmed.len() - 1].to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    fn parse_env_entries(content: &str) -> Vec<(String, String)> {
+        let mut entries = Vec::new();
+        let mut index = 0usize;
+
+        while index < content.len() {
+            let line_end = content[index..]
+                .find('\n')
+                .map(|offset| index + offset)
+                .unwrap_or(content.len());
+            let line = &content[index..line_end];
+
+            if let Some((key_offset, key)) = parse_key(line) {
+                let after_prefix = index + key_offset + key.len() + 1;
+                let (raw_value, consumed_len) = if key == "MEMKIT_GOOGLE_SERVICE_ACCOUNT_JSON" {
+                    extract_multiline_value(content, after_prefix)
+                } else {
+                    let value_end = content[after_prefix..]
+                        .find('\n')
+                        .map(|offset| after_prefix + offset)
+                        .unwrap_or(content.len());
+                    (&content[after_prefix..value_end], value_end.saturating_sub(after_prefix))
+                };
+                entries.push((key.to_string(), decode_value(raw_value)));
+                index = after_prefix + consumed_len;
+                if index < content.len() && content.as_bytes()[index] == b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
+
+            index = if line_end < content.len() {
+                line_end + 1
+            } else {
+                content.len()
+            };
+        }
+
+        entries
     }
 
     let try_env_file = |path: &std::path::Path| -> bool {
@@ -946,25 +1185,18 @@ fn load_memkit_google_json_from_dotenv_fallback() {
             Ok(c) => c,
             Err(_) => return false,
         };
-        let idx = match content.find(PREFIX) {
-            Some(i) => i,
-            None => return false,
-        };
-        let mut value = extract_value(&content, idx + PREFIX.len()).to_string();
-        if value.is_empty() || !value.starts_with('{') {
-            if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
-                value = value[1..value.len() - 1].replace("\\\"", "\"");
-            } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
-                value = value[1..value.len() - 1].to_string();
+        let mut loaded_any = false;
+        for (key, value) in parse_env_entries(&content) {
+            if key.is_empty() || std::env::var_os(&key).is_some() {
+                continue;
             }
+            // SAFETY: single-threaded at startup; no other thread reads these vars yet.
+            unsafe {
+                std::env::set_var(&key, value);
+            }
+            loaded_any = true;
         }
-        if value.starts_with('{') {
-            // SAFETY: single-threaded at startup; no other thread reads this var yet.
-            unsafe { std::env::set_var("MEMKIT_GOOGLE_SERVICE_ACCOUNT_JSON", value); }
-            true
-        } else {
-            false
-        }
+        loaded_any
     };
 
     if let Ok(cwd) = std::env::current_dir() {
@@ -984,9 +1216,7 @@ fn load_memkit_google_json_from_dotenv_fallback() {
         dir = d.parent().map(|p| p.to_path_buf());
     }
     if let Some(home) = dirs::home_dir() {
-        if try_env_file(&home.join(".memkit").join(".env")) {
-            return;
-        }
+        let _ = try_env_file(&home.join(".memkit").join(".env"));
     }
 }
 
@@ -1000,35 +1230,45 @@ async fn main() {
 
 async fn run() -> Result<()> {
     dotenvy::dotenv().ok();
-    load_memkit_google_json_from_dotenv_fallback();
+    load_env_file_fallback();
     let args: Vec<String> = env::args().skip(1).collect();
     let (args, ctx) = parse_global_flags(&args);
-
-    config::ensure_config_exists().context("failed to create config (e.g. ~/.config/memkit/memkit.json)")?;
 
     if let Some(cfg) = parse_headless_start(&args)? {
         serve_with_startup(cfg.packs, cfg.host, cfg.port).await?;
         return Ok(());
     }
 
-    match parse_cli_command(&args)? {
+    let cmd = parse_cli_command(&args)?;
+    let allow_auth_refresh = !matches!(
+        &cmd,
+        CliCommand::Help | CliCommand::Version | CliCommand::Schema { .. } | CliCommand::Login
+    );
+    let auth_state = auth::load_runtime_auth(allow_auth_refresh).await?;
+
+    match cmd {
         CliCommand::Version => print_version(),
         CliCommand::Help => print_help(),
         CliCommand::Schema { command, format } => {
             crate::cli::schema::print_schema(command.as_deref(), format)?;
             return Ok(());
         }
-        CliCommand::Serve { pack, host, port, foreground } => {
+        CliCommand::Serve {
+            pack,
+            host,
+            port,
+            foreground,
+        } => {
             let run_server = env::var("MEMKIT_SERVE_FOREGROUND").is_ok() || foreground;
             if !run_server {
-                let exe = std::env::current_exe()
-                    .map_err(|e| anyhow!("current exe: {}", e))?;
+                let exe = std::env::current_exe().map_err(|e| anyhow!("current exe: {}", e))?;
                 let child_args: Vec<String> = std::env::args().skip(1).collect();
                 let mut cmd = std::process::Command::new(&exe);
                 cmd.args(&child_args).env("MEMKIT_SERVE_FOREGROUND", "1");
                 cmd.stdout(std::process::Stdio::null());
                 cmd.stderr(std::process::Stdio::null());
-                cmd.spawn().map_err(|e| anyhow!("failed to start server process: {}", e))?;
+                cmd.spawn()
+                    .map_err(|e| anyhow!("failed to start server process: {}", e))?;
                 let cfg = ServerConfig::for_cli_serve(host.clone(), port);
                 cli_client::wait_for_server_ready(&cfg).await?;
                 println!(
@@ -1052,7 +1292,11 @@ async fn run() -> Result<()> {
         }
         CliCommand::Stop { port } => {
             let port = port
-                .or_else(|| env::var("API_PORT").ok().and_then(|v| v.parse::<u16>().ok()))
+                .or_else(|| {
+                    env::var("API_PORT")
+                        .ok()
+                        .and_then(|v| v.parse::<u16>().ok())
+                })
                 .unwrap_or(4242);
             if cli_client::stop_server_on_port(port)? {
                 println!(
@@ -1092,8 +1336,11 @@ async fn run() -> Result<()> {
                         print!("Remove pack at {}? [y/N] ", target.display());
                         let _ = std::io::Write::flush(&mut std::io::stdout());
                         let mut line = String::new();
-                        std::io::stdin().read_line(&mut line).context("read confirmation")?;
-                        let confirmed = line.trim().eq_ignore_ascii_case("y") || line.trim().eq_ignore_ascii_case("yes");
+                        std::io::stdin()
+                            .read_line(&mut line)
+                            .context("read confirmation")?;
+                        let confirmed = line.trim().eq_ignore_ascii_case("y")
+                            || line.trim().eq_ignore_ascii_case("yes");
                         if !confirmed {
                             return Ok(());
                         }
@@ -1108,10 +1355,13 @@ async fn run() -> Result<()> {
             }
 
             let commands_need_server = !matches!(
-                cmd,
+                &cmd,
                 CliCommand::Help
                     | CliCommand::Version
                     | CliCommand::Schema { .. }
+                    | CliCommand::Login
+                    | CliCommand::Logout
+                    | CliCommand::WhoAmI
                     | CliCommand::Use(_)
                     | CliCommand::Doctor
                     | CliCommand::Serve { .. }
@@ -1129,13 +1379,15 @@ async fn run() -> Result<()> {
                 } else {
                     cli_client::ensure_server(&cfg).await?;
                 }
-                let skip_stderr_server_note = matches!(
-                    &cmd,
-                    CliCommand::Status { dir: None } | CliCommand::List
-                ) && ctx.output_format != OutputFormat::Json;
+                let skip_stderr_server_note =
+                    matches!(&cmd, CliCommand::Status { dir: None } | CliCommand::List)
+                        && ctx.output_format != OutputFormat::Json;
                 if !skip_stderr_server_note {
-                    cli_client::print_server_note_running(&cfg, ctx.output_format == OutputFormat::Json)
-                        .await;
+                    cli_client::print_server_note_running(
+                        &cfg,
+                        ctx.output_format == OutputFormat::Json,
+                    )
+                    .await;
                 }
             }
 
@@ -1149,17 +1401,54 @@ async fn run() -> Result<()> {
                     let path_str = target.display().to_string();
                     let out = cli_client::remove(&cfg, &path_str).await?;
                     if ctx.output_format != OutputFormat::Json {
-                        if let Some(job_id) = out.get("job").and_then(|j| j.get("id")).and_then(|v| v.as_str()) {
+                        if let Some(job_id) = out
+                            .get("job")
+                            .and_then(|j| j.get("id"))
+                            .and_then(|v| v.as_str())
+                        {
                             println!(
                                 "{} ({}). Run 'mk status' to check progress.",
-                                crate::term::style_stdout("Removal started", |s| s.green().to_string()),
+                                crate::term::style_stdout("Removal started", |s| s
+                                    .green()
+                                    .to_string()),
                                 job_id
                             );
                         }
                     }
                     Ok(CommandOut::Output(out))
                 }
-                CliCommand::Add { local_path, pack, api_request } => {
+                CliCommand::Login => {
+                    let out = auth::login(ctx.output_format == OutputFormat::Json).await?;
+                    if ctx.output_format == OutputFormat::Json {
+                        Ok(CommandOut::Output(out))
+                    } else {
+                        print_login_text(&out);
+                        Ok(CommandOut::Done)
+                    }
+                }
+                CliCommand::Logout => {
+                    let out = auth::logout().await?;
+                    if ctx.output_format == OutputFormat::Json {
+                        Ok(CommandOut::Output(out))
+                    } else {
+                        print_logout_text(&out);
+                        Ok(CommandOut::Done)
+                    }
+                }
+                CliCommand::WhoAmI => {
+                    let out = crate::auth::whoami_response(&auth_state);
+                    if ctx.output_format == OutputFormat::Json {
+                        Ok(CommandOut::Output(serde_json::to_value(out)?))
+                    } else {
+                        print_whoami_text(&out);
+                        Ok(CommandOut::Done)
+                    }
+                }
+                CliCommand::Add {
+                    local_path,
+                    pack,
+                    api_request,
+                } => {
                     if let Some(ref body) = api_request {
                         if ctx.dry_run {
                             let out = serde_json::json!({
@@ -1174,11 +1463,19 @@ async fn run() -> Result<()> {
                             let pack_root = ensure_pack_root(pack.as_deref())?;
                             let mut body = body.clone();
                             if let Some(obj) = body.as_object_mut() {
-                                obj.insert("path".to_string(), serde_json::Value::String(pack_root.to_string_lossy().to_string()));
+                                obj.insert(
+                                    "path".to_string(),
+                                    serde_json::Value::String(
+                                        pack_root.to_string_lossy().to_string(),
+                                    ),
+                                );
                             }
                             let out = cli_client::add(&cfg, &body).await?;
                             if ctx.output_format != OutputFormat::Json {
-                                cli_client::print_add_started(&out, pack_root.to_string_lossy().as_ref());
+                                cli_client::print_add_started(
+                                    &out,
+                                    pack_root.to_string_lossy().as_ref(),
+                                );
                             }
                             Ok(CommandOut::Output(out))
                         }
@@ -1212,14 +1509,21 @@ async fn run() -> Result<()> {
                             let path_str = source.to_string_lossy().to_string();
                             let mut body = serde_json::json!({ "path": path_str });
                             if pack.is_some() {
-                                body["pack"] = serde_json::json!(pack_root.to_string_lossy().to_string());
+                                body["pack"] =
+                                    serde_json::json!(pack_root.to_string_lossy().to_string());
                             }
                             let mut out = cli_client::add(&cfg, &body).await?;
                             if ctx.output_format != OutputFormat::Json {
-                                if let Some(job_id) = out.get("job").and_then(|j| j.get("id")).and_then(serde_json::Value::as_str) {
+                                if let Some(job_id) = out
+                                    .get("job")
+                                    .and_then(|j| j.get("id"))
+                                    .and_then(serde_json::Value::as_str)
+                                {
                                     println!(
                                         "{} ({}). Waiting for indexing to finish...",
-                                        crate::term::style_stdout("Adding", |s| s.green().to_string()),
+                                        crate::term::style_stdout("Adding", |s| s
+                                            .green()
+                                            .to_string()),
                                         job_id
                                     );
                                 }
@@ -1316,12 +1620,31 @@ async fn run() -> Result<()> {
                     }
                     Ok(CommandOut::Done)
                 }
-                CliCommand::Query { query, top_k, use_reranker, raw, pack } => {
+                CliCommand::Query {
+                    query,
+                    top_k,
+                    use_reranker,
+                    raw,
+                    pack,
+                } => {
                     let pack_cloud = pack_cloud_for_cli(pack.as_deref());
-                    let out = cli_client::query(&cfg, &QueryArgs { query, top_k, use_reranker, raw }, pack.as_deref()).await?;
+                    let out = cli_client::query(
+                        &cfg,
+                        &QueryArgs {
+                            query,
+                            top_k,
+                            use_reranker,
+                            raw,
+                        },
+                        pack.as_deref(),
+                    )
+                    .await?;
                     let use_formatted = !raw && ctx.output_format != OutputFormat::Json;
                     if use_formatted {
-                        if let Some(synth_err) = out.get("synthesis_error").and_then(serde_json::Value::as_str) {
+                        if let Some(synth_err) = out
+                            .get("synthesis_error")
+                            .and_then(serde_json::Value::as_str)
+                        {
                             println!(
                                 "{}",
                                 crate::term::style_stdout(
@@ -1330,45 +1653,77 @@ async fn run() -> Result<()> {
                                 )
                             );
                             println!("  {}", synth_err);
-                            if let Some(results) = out.get("results").and_then(serde_json::Value::as_array) {
+                            if let Some(results) =
+                                out.get("results").and_then(serde_json::Value::as_array)
+                            {
                                 if !results.is_empty() {
                                     println!();
                                     println!("Top results from your pack:");
                                     for (i, r) in results.iter().take(5).enumerate() {
-                                        let path = r.get("file_path").and_then(serde_json::Value::as_str).unwrap_or("?");
+                                        let path = r
+                                            .get("file_path")
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or("?");
                                         let path_shown =
                                             crate::google::cli_source_link(path, pack_cloud);
-                                        let content = r.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
-                                        let preview = if content.len() > 120 { format!("{}...", &content[..120]) } else { content.to_string() };
+                                        let content = r
+                                            .get("content")
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or("");
+                                        let preview = if content.len() > 120 {
+                                            format!("{}...", &content[..120])
+                                        } else {
+                                            content.to_string()
+                                        };
                                         println!(
                                             "  {}. {} {}",
                                             i + 1,
-                                            crate::term::style_stdout(&path_shown, |s| s.dimmed().to_string()),
-                                            crate::term::style_stdout(&preview, |s| s.dimmed().to_string())
+                                            crate::term::style_stdout(&path_shown, |s| s
+                                                .dimmed()
+                                                .to_string()),
+                                            crate::term::style_stdout(&preview, |s| s
+                                                .dimmed()
+                                                .to_string())
                                         );
                                     }
                                 }
                             }
-                            if let Some(rr) = out.get("retrieval_results").and_then(serde_json::Value::as_array) {
+                            if let Some(rr) = out
+                                .get("retrieval_results")
+                                .and_then(serde_json::Value::as_array)
+                            {
                                 if !rr.is_empty() {
                                     println!();
                                     println!("Retrieval (vector store, before rerank):");
                                     for (i, r) in rr.iter().take(10).enumerate() {
-                                        let path = r.get("file_path").and_then(serde_json::Value::as_str).unwrap_or("?");
+                                        let path = r
+                                            .get("file_path")
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or("?");
                                         let path_shown =
                                             crate::google::cli_source_link(path, pack_cloud);
-                                        let score = r.get("score").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-                                        let content = r.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
+                                        let score = r
+                                            .get("score")
+                                            .and_then(serde_json::Value::as_f64)
+                                            .unwrap_or(0.0);
+                                        let content = r
+                                            .get("content")
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or("");
                                         println!(
                                             "  {}. {} score={:.3}",
                                             i + 1,
-                                            crate::term::style_stdout(&path_shown, |s| s.dimmed().to_string()),
+                                            crate::term::style_stdout(&path_shown, |s| s
+                                                .dimmed()
+                                                .to_string()),
                                             score
                                         );
                                         let wrapped = wrap_retrieval_preview(content, 72, 200);
                                         println!(
                                             "{}",
-                                            crate::term::style_stdout(&wrapped, |s| s.dimmed().to_string())
+                                            crate::term::style_stdout(&wrapped, |s| s
+                                                .dimmed()
+                                                .to_string())
                                         );
                                     }
                                 }
@@ -1378,7 +1733,9 @@ async fn run() -> Result<()> {
                             out.get("answer").and_then(serde_json::Value::as_str),
                             out.get("sources").and_then(serde_json::Value::as_array),
                         ) {
-                            if let Some(model) = out.get("model").and_then(serde_json::Value::as_str) {
+                            if let Some(model) =
+                                out.get("model").and_then(serde_json::Value::as_str)
+                            {
                                 if !model.is_empty() {
                                     let c = crate::term::color_stdout();
                                     println!(
@@ -1396,11 +1753,7 @@ async fn run() -> Result<()> {
                             let physical = query_answer_physical_lines(answer, terminal_columns());
                             for (i, line) in physical.iter().enumerate() {
                                 if i == 0 {
-                                    println!(
-                                        "{} {}",
-                                        crate::term::dimmed_word(c, "❯"),
-                                        line
-                                    );
+                                    println!("{} {}", crate::term::dimmed_word(c, "❯"), line);
                                 } else {
                                     println!("  {}", line);
                                 }
@@ -1413,8 +1766,7 @@ async fn run() -> Result<()> {
                                         .get("path")
                                         .and_then(serde_json::Value::as_str)
                                         .unwrap_or("?");
-                                    let shown =
-                                        crate::google::cli_source_link(path, pack_cloud);
+                                    let shown = crate::google::cli_source_link(path, pack_cloud);
                                     println!("  {}", shown);
                                 }
                             }
@@ -1437,11 +1789,12 @@ async fn run() -> Result<()> {
             if let CommandOut::Output(out) = command_out {
                 let out_display = trim_add_response_content(&out);
                 let json_str = serde_json::to_string_pretty(&out_display)?;
-                let output = if ctx.output_format == OutputFormat::Json || !crate::term::color_stdout() {
-                    json_str
-                } else {
-                    to_colored_json_auto(&out_display).unwrap_or(json_str.clone())
-                };
+                let output =
+                    if ctx.output_format == OutputFormat::Json || !crate::term::color_stdout() {
+                        json_str
+                    } else {
+                        to_colored_json_auto(&out_display).unwrap_or(json_str.clone())
+                    };
                 println!("{}", output);
             }
         }

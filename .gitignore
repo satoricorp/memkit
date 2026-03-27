@@ -9,6 +9,9 @@
 /.fastembed_cache
 /.local-run
 /.local-data
+/node_modules
 .env
 .cursor
 .local-runtime
+
+.env.local

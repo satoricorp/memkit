@@ -55,6 +55,9 @@ pub enum CliCommand {
         pack: Option<String>,
         destination: Option<String>,
     },
+    Login,
+    Logout,
+    WhoAmI,
     Use(UseSpec),
     Doctor,
     Serve {

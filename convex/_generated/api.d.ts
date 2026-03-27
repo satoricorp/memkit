@@ -9,6 +9,8 @@
  */
 
 import type * as auth from "../auth.js";
+import type * as cli_auth from "../cli_auth.js";
+import type * as cli_auth_store from "../cli_auth_store.js";
 import type * as http from "../http.js";
 import type * as orgs from "../orgs.js";
 import type * as users from "../users.js";
@@ -22,6 +24,8 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
+  cli_auth: typeof cli_auth;
+  cli_auth_store: typeof cli_auth_store;
   http: typeof http;
   orgs: typeof orgs;
   users: typeof users;
