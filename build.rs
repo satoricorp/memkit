@@ -7,46 +7,36 @@ fn main() {
     let manifest_dir = PathBuf::from(
         env::var("CARGO_MANIFEST_DIR").expect("memkit build requires CARGO_MANIFEST_DIR"),
     );
-    let git_hash = git_output(&manifest_dir, &["rev-parse", "--short", "HEAD"]);
-    let git_dir_raw = git_output(&manifest_dir, &["rev-parse", "--git-dir"]);
-    let git_dir = resolve_git_dir(&manifest_dir, git_dir_raw.trim());
+    let semver = env::var("CARGO_PKG_VERSION").expect("memkit build requires CARGO_PKG_VERSION");
+    println!("cargo:rustc-env=MEMKIT_SEMVER={}", semver);
 
-    println!("cargo:rustc-env=MEMKIT_BUILD_VERSION={}", git_hash);
-    emit_git_rerun_hints(&git_dir);
+    if let Some(git_hash) = git_output(&manifest_dir, &["rev-parse", "--short", "HEAD"]) {
+        println!("cargo:rustc-env=MEMKIT_GIT_SHA={}", git_hash);
+    }
+
+    if let Some(git_dir_raw) = git_output(&manifest_dir, &["rev-parse", "--git-dir"]) {
+        let git_dir = resolve_git_dir(&manifest_dir, git_dir_raw.trim());
+        emit_git_rerun_hints(&git_dir);
+    }
 }
 
-fn git_output(manifest_dir: &Path, args: &[&str]) -> String {
+fn git_output(manifest_dir: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(manifest_dir)
         .output()
-        .unwrap_or_else(|err| {
-            panic!(
-                "memkit build requires git metadata: failed to run `git {}`: {}",
-                args.join(" "),
-                err
-            )
-        });
+        .ok()?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!(
-            "memkit build requires git metadata: `git {}` failed: {}",
-            args.join(" "),
-            stderr.trim()
-        );
+        return None;
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .unwrap_or_else(|err| panic!("memkit build requires utf-8 git output: {}", err));
+    let stdout = String::from_utf8(output.stdout).ok()?;
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
-        panic!(
-            "memkit build requires git metadata: `git {}` returned empty output",
-            args.join(" ")
-        );
+        return None;
     }
-    trimmed.to_string()
+    Some(trimmed.to_string())
 }
 
 fn resolve_git_dir(manifest_dir: &Path, git_dir_raw: &str) -> PathBuf {
@@ -62,13 +52,9 @@ fn emit_git_rerun_hints(git_dir: &Path) {
     let head_path = git_dir.join("HEAD");
     println!("cargo:rerun-if-changed={}", head_path.display());
 
-    let head_contents = fs::read_to_string(&head_path).unwrap_or_else(|err| {
-        panic!(
-            "memkit build requires git metadata: failed to read {}: {}",
-            head_path.display(),
-            err
-        )
-    });
+    let Ok(head_contents) = fs::read_to_string(&head_path) else {
+        return;
+    };
     if let Some(head_ref) = head_contents.trim().strip_prefix("ref: ") {
         println!(
             "cargo:rerun-if-changed={}",

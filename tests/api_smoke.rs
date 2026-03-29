@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 
-fn expected_git_version() -> String {
+fn expected_git_sha() -> String {
     let output = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -23,6 +23,10 @@ fn expected_git_version() -> String {
         .expect("git rev-parse utf8")
         .trim()
         .to_string()
+}
+
+fn expected_release_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
@@ -116,7 +120,8 @@ fn stop_server(child: &mut Child) {
 fn smoke_health_status_add_query_flows() {
     let pack_root = unique_temp_dir("memkit-smoke-pack");
     create_pack_fixture(&pack_root);
-    let expected_version = expected_git_version();
+    let expected_version = expected_release_version();
+    let expected_git_sha = expected_git_sha();
 
     let docs_dir = pack_root.join("docs");
     fs::create_dir_all(&docs_dir).expect("create docs dir");
@@ -139,6 +144,10 @@ fn smoke_health_status_add_query_flows() {
     assert_eq!(
         health.get("version").and_then(Value::as_str),
         Some(expected_version.as_str())
+    );
+    assert_eq!(
+        health.get("git_sha").and_then(Value::as_str),
+        Some(expected_git_sha.as_str())
     );
 
     let initialize: Value = client
@@ -164,6 +173,14 @@ fn smoke_health_status_add_query_flows() {
             .and_then(|server_info| server_info.get("version"))
             .and_then(Value::as_str),
         Some(expected_version.as_str())
+    );
+    assert_eq!(
+        initialize
+            .get("result")
+            .and_then(|result| result.get("serverInfo"))
+            .and_then(|server_info| server_info.get("gitSha"))
+            .and_then(Value::as_str),
+        Some(expected_git_sha.as_str())
     );
 
     let status: Value = client

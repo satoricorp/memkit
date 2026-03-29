@@ -4,8 +4,25 @@ use std::io::IsTerminal;
 
 use owo_colors::OwoColorize;
 
-/// Build version embedded at compile time from `git rev-parse --short HEAD`.
-pub const BUILD_VERSION: &str = env!("MEMKIT_BUILD_VERSION");
+/// Stable semver embedded at compile time from Cargo package metadata.
+pub const RELEASE_VERSION: &str = env!("MEMKIT_SEMVER");
+/// Optional git short SHA embedded at compile time when git metadata is available.
+pub const GIT_SHA: Option<&str> = option_env!("MEMKIT_GIT_SHA");
+
+pub fn release_version() -> &'static str {
+    RELEASE_VERSION
+}
+
+pub fn git_sha() -> Option<&'static str> {
+    GIT_SHA.filter(|sha| !sha.is_empty())
+}
+
+pub fn display_version() -> String {
+    match git_sha() {
+        Some(sha) => format!("{} ({})", release_version(), sha),
+        None => release_version().to_string(),
+    }
+}
 
 /// Returns true if we should use colors on stdout (TTY and NO_COLOR not set).
 pub fn color_stdout() -> bool {
@@ -65,7 +82,7 @@ pub fn print_help_title(color: bool) {
             println!("{}", line);
         }
     }
-    let copyright = format!("© Satori Engineering Inc. 2026 Version {}", BUILD_VERSION);
+    let copyright = format!("© Satori Engineering Inc. 2026 Version {}", display_version());
     if color {
         println!("{}", copyright.cyan());
     } else {
@@ -75,20 +92,33 @@ pub fn print_help_title(color: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::BUILD_VERSION;
+    use super::{GIT_SHA, RELEASE_VERSION};
 
     #[test]
-    fn build_version_is_git_short_sha_like() {
+    fn release_version_is_semver_like() {
         assert!(
-            BUILD_VERSION.len() >= 7 && BUILD_VERSION.len() <= 40,
-            "unexpected build version length: {}",
-            BUILD_VERSION
+            RELEASE_VERSION
+                .split('.')
+                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())),
+            "unexpected release version: {}",
+            RELEASE_VERSION
         );
-        assert!(
-            BUILD_VERSION.chars().all(|c| c.is_ascii_hexdigit()),
-            "unexpected build version characters: {}",
-            BUILD_VERSION
-        );
+    }
+
+    #[test]
+    fn git_sha_is_short_hex_when_present() {
+        if let Some(sha) = GIT_SHA {
+            assert!(
+                sha.len() >= 7 && sha.len() <= 40,
+                "unexpected git sha length: {}",
+                sha
+            );
+            assert!(
+                sha.chars().all(|c| c.is_ascii_hexdigit()),
+                "unexpected git sha characters: {}",
+                sha
+            );
+        }
     }
 }
 

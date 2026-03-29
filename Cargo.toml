@@ -2,6 +2,9 @@
 name = "memkit"
 version = "0.1.0"
 edition = "2024"
+description = "Local memory pack CLI + server (Rust)."
+repository = "https://github.com/satoricorp/memkit"
+homepage = "https://github.com/satoricorp/memkit"
 
 [[bin]]
 name = "mk"
@@ -60,3 +63,8 @@ hyper-rustls = "0.27"
 indicatif = "0.17"
 urlencoding = "2"
 url = "2"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

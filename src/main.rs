@@ -1036,7 +1036,7 @@ fn print_help() {
 }
 
 fn print_version() {
-    println!("memkit {}", crate::term::BUILD_VERSION);
+    println!("memkit {}", crate::term::display_version());
 }
 
 fn profile_label(profile: &crate::config::AuthProfile) -> String {

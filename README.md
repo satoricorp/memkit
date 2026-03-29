@@ -2,13 +2,40 @@
 
 Local memory pack CLI + server (Rust).
 
-## Build
+## Install
+
+Once a semver tag such as `v0.1.0` has been released, users can install `mk` with either:
+
+```bash
+brew install satoricorp/tap/memkit
+```
+
+or:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/satoricorp/memkit/releases/download/v0.1.0/memkit-installer.sh | sh
+```
+
+The CLI prints both the release version and build SHA in human-facing output, for example `memkit 0.1.0 (abc1234)`.
+
+## Build From Source
 
 ```bash
 cargo build --release
 ```
 
 The CLI binary is `mk` (at `target/release/mk`).
+
+## Release Automation
+
+Tagging a semver release such as `v0.1.0` triggers [`release.yml`](/Users/joe/git/memkit/.github/workflows/release.yml), which:
+
+- builds release archives for macOS arm64, macOS x86_64, and Linux x86_64
+- generates a `curl | sh` installer script and Homebrew formula
+- publishes GitHub Release artifacts and checksums
+- updates the `satoricorp/homebrew-tap` formula
+
+The workflow expects a `HOMEBREW_TAP_TOKEN` GitHub Actions secret with push access to `satoricorp/homebrew-tap`.
 
 ## Convex Backend
 
@@ -151,7 +178,7 @@ For local iteration, `./scripts/local-start.sh` is usually simpler than Docker.
 
 ## API
 
-- `GET /health` — Health check
+- `GET /health` — Health check (`version` is semver; `git_sha` is included when available)
 - `GET /status` — Pack status
 - `GET /google/service-account-email` — Service account email for sharing (when Google is configured)
 - `POST /query` — Query with synthesis
