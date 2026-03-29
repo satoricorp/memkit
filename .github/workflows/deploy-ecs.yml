@@ -124,26 +124,36 @@ jobs:
           set -euo pipefail
 
           deploy_enabled=true
+          missing=()
           if [ ! -f .gitmodules ]; then
             deploy_enabled=false
+            missing+=(".gitmodules")
           fi
           if [ -z "${DEPLOY_SUBMODULE_SSH_KEY:-}" ]; then
             deploy_enabled=false
+            missing+=("DEPLOY_SUBMODULE_SSH_KEY")
           fi
           if [ -z "${AWS_DEPLOY_ROLE_ARN:-}" ]; then
             deploy_enabled=false
+            missing+=("AWS_DEPLOY_ROLE_ARN")
           fi
           if [ -z "${AWS_REGION:-}" ]; then
             deploy_enabled=false
+            missing+=("AWS_REGION")
           fi
 
           echo "deploy_enabled=${deploy_enabled}" >> "$GITHUB_OUTPUT"
           echo "deploy_infra=${{ needs.prepare.outputs.deploy_infra }}" >> "$GITHUB_OUTPUT"
+          if [ "${deploy_enabled}" != "true" ]; then
+            echo "missing_keys=$(IFS=,; echo "${missing[*]}")" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Skip when deploy is not configured
+      - name: Fail when deploy is misconfigured
         if: steps.deploy-config.outputs.deploy_enabled != 'true'
         run: |
-          echo "Skipping deploy. Configure infra/deploy plus DEPLOY_SUBMODULE_SSH_KEY, AWS_DEPLOY_ROLE_ARN, and AWS_REGION to enable it."
+          echo "Deploy is configured in this repo, but GitHub Actions did not receive: ${{ steps.deploy-config.outputs.missing_keys }}"
+          echo "Check the production environment secrets/variables and confirm the workflow run is allowed to use that environment."
+          exit 1
 
       - name: Checkout private deploy submodule
         if: steps.deploy-config.outputs.deploy_enabled == 'true'
