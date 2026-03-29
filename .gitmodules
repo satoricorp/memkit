@@ -1,0 +1,3 @@
+[submodule "infra/deploy"]
+	path = infra/deploy
+	url = git@github.com:satoricorp/infra-memkit.git

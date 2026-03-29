@@ -1,0 +1,206 @@
+name: Deploy Cloud
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "docker/**"
+      - ".gitmodules"
+      - "infra/deploy"
+      - "infra/README.md"
+      - "packages/sdk/**"
+      - "packages/sdk-go/**"
+      - "packages/sdk-py/**"
+      - "src/**"
+      - "tests/**"
+      - ".github/workflows/deploy-ecs.yml"
+  workflow_dispatch:
+    inputs:
+      deploy_infra:
+        description: "Also apply infra from infra/deploy before rolling the app"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      submodule_configured: ${{ steps.detect.outputs.submodule_configured }}
+      deploy_infra: ${{ steps.detect.outputs.deploy_infra }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect deploy inputs
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          GITHUB_SHA: ${{ github.sha }}
+          INPUT_DEPLOY_INFRA: ${{ github.event.inputs.deploy_infra }}
+        run: |
+          set -euo pipefail
+
+          if git config -f .gitmodules --get-regexp '^submodule\.infra/deploy\.path$' >/dev/null 2>&1; then
+            echo "submodule_configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "submodule_configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          deploy_infra=false
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "${INPUT_DEPLOY_INFRA:-false}" = "true" ]; then
+              deploy_infra=true
+            fi
+          else
+            if [ -n "${EVENT_BEFORE:-}" ] && [ "${EVENT_BEFORE}" != "0000000000000000000000000000000000000000" ]; then
+              changed_files="$(git diff --name-only "${EVENT_BEFORE}" "${GITHUB_SHA}")"
+            else
+              changed_files="$(git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}")"
+            fi
+
+            if printf '%s\n' "${changed_files}" | grep -Eq '^(\.gitmodules|infra/deploy)$'; then
+              deploy_infra=true
+            fi
+          fi
+
+          echo "deploy_infra=${deploy_infra}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: prepare
+    if: needs.prepare.outputs.submodule_configured == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: memkit-production-deploy
+      cancel-in-progress: false
+    env:
+      DEPLOY_ENV: ${{ vars.DEPLOY_ENV || 'production' }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      STACK_NAME: ${{ vars.STACK_NAME || 'MemkitCloudStack' }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'memkit-api' }}
+      ECS_CLUSTER: ${{ vars.ECS_CLUSTER || 'memkit-api' }}
+      ECS_SERVICE: ${{ vars.ECS_SERVICE || 'memkit-api' }}
+      ECS_CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME || 'memkit-api' }}
+      CDK_GITHUB_OWNER: ${{ vars.CDK_GITHUB_OWNER || github.repository_owner }}
+      CDK_GITHUB_REPO: ${{ vars.CDK_GITHUB_REPO || github.event.repository.name }}
+      CDK_GITHUB_ENVIRONMENT: ${{ vars.CDK_GITHUB_ENVIRONMENT || 'production' }}
+      CDK_ECR_REPOSITORY_NAME: ${{ vars.CDK_ECR_REPOSITORY_NAME || vars.ECR_REPOSITORY || 'memkit-api' }}
+      CDK_SERVICE_NAME: ${{ vars.CDK_SERVICE_NAME || vars.ECS_SERVICE || 'memkit-api' }}
+      CDK_CONTAINER_NAME: ${{ vars.CDK_CONTAINER_NAME || vars.ECS_CONTAINER_NAME || 'memkit-api' }}
+      CDK_INITIAL_IMAGE_TAG: ${{ vars.CDK_INITIAL_IMAGE_TAG || 'bootstrap' }}
+      CDK_CPU: ${{ vars.CDK_CPU || '2048' }}
+      CDK_MEMORY_LIMIT_MIB: ${{ vars.CDK_MEMORY_LIMIT_MIB || '4096' }}
+      CDK_EPHEMERAL_STORAGE_GIB: ${{ vars.CDK_EPHEMERAL_STORAGE_GIB || '100' }}
+      CDK_DESIRED_COUNT: ${{ vars.CDK_DESIRED_COUNT || '1' }}
+      CDK_MIN_CAPACITY: ${{ vars.CDK_MIN_CAPACITY || '1' }}
+      CDK_MAX_CAPACITY: ${{ vars.CDK_MAX_CAPACITY || '4' }}
+      CDK_CPU_TARGET_UTILIZATION: ${{ vars.CDK_CPU_TARGET_UTILIZATION || '60' }}
+      CDK_MEMORY_TARGET_UTILIZATION: ${{ vars.CDK_MEMORY_TARGET_UTILIZATION || '70' }}
+      CDK_HEALTH_CHECK_GRACE_PERIOD_SECONDS: ${{ vars.CDK_HEALTH_CHECK_GRACE_PERIOD_SECONDS || '60' }}
+      CDK_SECRET_ENV: ${{ vars.CDK_SECRET_ENV }}
+      DEPLOY_SUBMODULE_SSH_KEY: ${{ secrets.DEPLOY_SUBMODULE_SSH_KEY }}
+      AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect deploy configuration
+        id: deploy-config
+        run: |
+          set -euo pipefail
+
+          deploy_enabled=true
+          if [ ! -f .gitmodules ]; then
+            deploy_enabled=false
+          fi
+          if [ -z "${DEPLOY_SUBMODULE_SSH_KEY:-}" ]; then
+            deploy_enabled=false
+          fi
+          if [ -z "${AWS_DEPLOY_ROLE_ARN:-}" ]; then
+            deploy_enabled=false
+          fi
+          if [ -z "${AWS_REGION:-}" ]; then
+            deploy_enabled=false
+          fi
+
+          echo "deploy_enabled=${deploy_enabled}" >> "$GITHUB_OUTPUT"
+          echo "deploy_infra=${{ needs.prepare.outputs.deploy_infra }}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip when deploy is not configured
+        if: steps.deploy-config.outputs.deploy_enabled != 'true'
+        run: |
+          echo "Skipping deploy. Configure infra/deploy plus DEPLOY_SUBMODULE_SSH_KEY, AWS_DEPLOY_ROLE_ARN, and AWS_REGION to enable it."
+
+      - name: Checkout private deploy submodule
+        if: steps.deploy-config.outputs.deploy_enabled == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          ssh-key: ${{ secrets.DEPLOY_SUBMODULE_SSH_KEY }}
+
+      - name: Validate deploy scripts
+        if: steps.deploy-config.outputs.deploy_enabled == 'true'
+        run: |
+          set -euo pipefail
+          test -f infra/deploy/scripts/deploy-infra.sh
+          test -f infra/deploy/scripts/deploy-app.sh
+
+      - name: Install Rust
+        if: steps.deploy-config.outputs.deploy_enabled == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Rust tests
+        if: steps.deploy-config.outputs.deploy_enabled == 'true'
+        run: cargo test --lib
+
+      - name: Build release binaries
+        if: steps.deploy-config.outputs.deploy_enabled == 'true'
+        run: cargo build --release --bin mk --bin memkit-server
+
+      - name: Configure AWS credentials
+        if: steps.deploy-config.outputs.deploy_enabled == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+
+      - name: Log in to Amazon ECR
+        if: steps.deploy-config.outputs.deploy_enabled == 'true'
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        if: steps.deploy-config.outputs.deploy_enabled == 'true'
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: sha-${{ github.sha }}
+        run: |
+          IMAGE_URI="$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker build -f docker/Dockerfile -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy infrastructure
+        if: steps.deploy-config.outputs.deploy_enabled == 'true' && steps.deploy-config.outputs.deploy_infra == 'true'
+        run: bash infra/deploy/scripts/deploy-infra.sh
+
+      - name: Deploy application
+        if: steps.deploy-config.outputs.deploy_enabled == 'true'
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.image_uri }}
+        run: bash infra/deploy/scripts/deploy-app.sh "$IMAGE_URI"
