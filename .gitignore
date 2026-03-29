@@ -13,5 +13,6 @@
 .env
 .cursor
 .local-runtime
+jwt_private_key.pem
 
 .env.local

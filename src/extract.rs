@@ -23,10 +23,7 @@ impl Drop for PanicHookGuard {
 
 /// Returns true if the extension is an Office format we extract with litchi.
 pub fn is_office_extension(ext: &str) -> bool {
-    matches!(
-        ext,
-        "doc" | "docx" | "xls" | "xlsx" | "xlsb"
-    )
+    matches!(ext, "doc" | "docx" | "xls" | "xlsx" | "xlsb")
 }
 
 /// Extract plain text from a file. Returns None if the file is not indexable or extraction fails.
@@ -97,7 +94,7 @@ fn extract_word(path: &Path) -> Option<String> {
 }
 
 fn extract_excel(path: &Path, ext: &str) -> Option<String> {
-    use litchi::sheet::{open_workbook, open_xls_workbook, open_xlsb_workbook, Workbook};
+    use litchi::sheet::{Workbook, open_workbook, open_xls_workbook, open_xlsb_workbook};
 
     let workbook: Box<dyn Workbook> = match ext {
         "xlsx" => open_workbook(path).ok()?,

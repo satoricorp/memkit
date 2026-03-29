@@ -113,27 +113,17 @@ fn doc_to_properties_and_embedding<'a>(
         ("source_path", Value::String(doc.source_path.clone())),
         ("content", Value::String(doc.content.clone())),
         ("content_hash", Value::String(doc.content_hash.clone())),
-        (
-            "chunk_index",
-            Value::I32(doc.chunk_index as i32),
-        ),
-        (
-            "start_offset",
-            Value::I64(doc.start_offset as i64),
-        ),
+        ("chunk_index", Value::I32(doc.chunk_index as i32)),
+        ("start_offset", Value::I64(doc.start_offset as i64)),
         ("end_offset", Value::I64(doc.end_offset as i64)),
-        (
-            "indexed_at",
-            Value::String(doc.indexed_at.to_rfc3339()),
-        ),
+        ("indexed_at", Value::String(doc.indexed_at.to_rfc3339())),
     ];
     let len = keys_and_values.len();
     let items = keys_and_values.into_iter().map(|(k, v)| {
         let k_arena = arena.alloc_str(k);
         (k_arena as &str, v)
     });
-    let props =
-        helix_db::utils::properties::ImmutablePropertiesMap::new(len, items, arena);
+    let props = helix_db::utils::properties::ImmutablePropertiesMap::new(len, items, arena);
     (Some(props), embedding_f64)
 }
 
@@ -142,10 +132,10 @@ fn insert_docs_into_storage(
     storage: &helix_db::helix_engine::storage_core::HelixGraphStorage,
     docs: &[SourceDoc],
 ) -> Result<()> {
+    use heed3::RoTxn;
     use helix_db::helix_engine::traversal_core::ops::g::G;
     use helix_db::helix_engine::traversal_core::ops::vectors::insert::InsertVAdapter;
     use helix_db::helix_engine::vector_core::vector::HVector;
-    use heed3::RoTxn;
 
     let mut txn = storage
         .graph_env
@@ -156,11 +146,7 @@ fn insert_docs_into_storage(
     for doc in docs {
         let (props, embedding_f64) = doc_to_properties_and_embedding(doc, &arena);
         let _ = G::new_mut(storage, &arena, &mut txn)
-            .insert_v::<fn(&HVector, &RoTxn) -> bool>(
-                &embedding_f64,
-                CHUNK_LABEL,
-                props,
-            )
+            .insert_v::<fn(&HVector, &RoTxn) -> bool>(&embedding_f64, CHUNK_LABEL, props)
             .collect_to_obj()
             .map_err(|e| anyhow::anyhow!("helix insert_v: {:?}", e))?;
     }
@@ -236,9 +222,15 @@ fn hvector_to_source_doc(
 ) -> Option<SourceDoc> {
     let p = v.properties.as_ref()?;
     let chunk_id = p.get("chunk_id").and_then(value_as_str).map(String::from)?;
-    let source_path = p.get("source_path").and_then(value_as_str).map(String::from)?;
+    let source_path = p
+        .get("source_path")
+        .and_then(value_as_str)
+        .map(String::from)?;
     let content = p.get("content").and_then(value_as_str).map(String::from)?;
-    let content_hash = p.get("content_hash").and_then(value_as_str).map(String::from)?;
+    let content_hash = p
+        .get("content_hash")
+        .and_then(value_as_str)
+        .map(String::from)?;
     let chunk_index = p.get("chunk_index").and_then(value_as_i64).unwrap_or(0) as usize;
     let start_offset = p.get("start_offset").and_then(value_as_i64).unwrap_or(0) as usize;
     let end_offset = p.get("end_offset").and_then(value_as_i64).unwrap_or(0) as usize;
@@ -313,11 +305,11 @@ pub fn helix_hybrid_query(
     #[cfg(feature = "helix")]
     {
         let _guard = helix_store_guard();
+        use heed3::RoTxn;
         use helix_db::helix_engine::traversal_core::ops::g::G;
         use helix_db::helix_engine::traversal_core::ops::vectors::search::SearchVAdapter;
         use helix_db::helix_engine::traversal_core::traversal_value::TraversalValue;
         use helix_db::helix_engine::vector_core::vector::HVector;
-        use heed3::RoTxn;
 
         let storage = open_helix_storage(path)?;
         let txn = storage
@@ -391,7 +383,8 @@ pub fn helix_write_graph_stats(
         "source_paths": source_paths,
         "index_warnings": index_warnings,
     });
-    std::fs::write(&path, serde_json::to_string_pretty(&json)?).context("write graph_stats.json")?;
+    std::fs::write(&path, serde_json::to_string_pretty(&json)?)
+        .context("write graph_stats.json")?;
     Ok(())
 }
 
@@ -424,7 +417,9 @@ pub fn helix_try_cached_index_status(pack_dir: &Path) -> Option<(usize, Vec<Stri
 }
 
 #[cfg(not(feature = "helix"))]
-pub fn helix_try_cached_index_status(_pack_dir: &Path) -> Option<(usize, Vec<String>, Vec<String>)> {
+pub fn helix_try_cached_index_status(
+    _pack_dir: &Path,
+) -> Option<(usize, Vec<String>, Vec<String>)> {
     None
 }
 
@@ -458,7 +453,9 @@ pub fn helix_graph_chunk_count(pack_dir: &Path) -> Option<usize> {
     let path = pack_dir.join(GRAPH_STATS_FILE);
     let data = std::fs::read_to_string(&path).ok()?;
     let obj: serde_json::Value = serde_json::from_str(&data).ok()?;
-    obj.get("chunks").and_then(|v| v.as_u64()).map(|v| v as usize)
+    obj.get("chunks")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
 }
 
 #[cfg(not(feature = "helix"))]
@@ -495,7 +492,10 @@ pub fn helix_graph_counts(pack_dir: &Path) -> (usize, usize) {
         return (0, 0);
     };
     let entities = obj.get("entities").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-    let relationships = obj.get("relationships").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let relationships = obj
+        .get("relationships")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
     (entities, relationships)
 }
 
@@ -559,15 +559,18 @@ fn insert_entities_and_edges<'a>(
     let all_entities: std::collections::HashSet<String> = entities
         .iter()
         .cloned()
-        .chain(relations.iter().flat_map(|r| [r.source.clone(), r.target.clone()]))
+        .chain(
+            relations
+                .iter()
+                .flat_map(|r| [r.source.clone(), r.target.clone()]),
+        )
         .collect();
 
     for name in &all_entities {
         if entity_map.contains_key(name) {
             continue;
         }
-        let keys_and_values: Vec<(&str, Value)> =
-            vec![("name", Value::String(name.clone()))];
+        let keys_and_values: Vec<(&str, Value)> = vec![("name", Value::String(name.clone()))];
         let len = keys_and_values.len();
         let items = keys_and_values.into_iter().map(|(k, v)| {
             let k_arena = arena.alloc_str(k);
@@ -585,15 +588,15 @@ fn insert_entities_and_edges<'a>(
 
     let mut seen_rel: HashSet<(String, String, String)> = HashSet::new();
     for rel in relations {
-        if !seen_rel.insert((
-            rel.source.clone(),
-            rel.relation.clone(),
-            rel.target.clone(),
-        )) {
+        if !seen_rel.insert((rel.source.clone(), rel.relation.clone(), rel.target.clone())) {
             continue;
         }
-        let Some(&from_id) = entity_map.get(&rel.source) else { continue };
-        let Some(&to_id) = entity_map.get(&rel.target) else { continue };
+        let Some(&from_id) = entity_map.get(&rel.source) else {
+            continue;
+        };
+        let Some(&to_id) = entity_map.get(&rel.target) else {
+            continue;
+        };
         let label = arena.alloc_str(rel.relation.as_str());
         let edge_res = G::new_mut(storage, arena, txn)
             .add_edge(label, None, from_id, to_id, false, false)
@@ -627,7 +630,14 @@ pub fn helix_write_entities_edges(
             .write_txn()
             .map_err(|e| anyhow::anyhow!("helix write_txn: {:?}", e))?;
         let arena = bumpalo::Bump::new();
-        insert_entities_and_edges(storage.as_ref(), &arena, &mut txn, entity_map, entities, relations)?;
+        insert_entities_and_edges(
+            storage.as_ref(),
+            &arena,
+            &mut txn,
+            entity_map,
+            entities,
+            relations,
+        )?;
         txn.commit()
             .map_err(|e| anyhow::anyhow!("helix commit: {:?}", e))?;
         helix_save_entity_id_map(pack_dir, entity_map)?;
@@ -645,7 +655,7 @@ mod helix_compiler_tests {
     /// Spike: verify HelixQL compiler (helixc) is embeddable — parse a minimal schema in-process.
     #[test]
     fn helixql_parse_minimal_schema() {
-        use helix_db::helixc::parser::{write_to_temp_file, HelixParser};
+        use helix_db::helixc::parser::{HelixParser, write_to_temp_file};
 
         let content = write_to_temp_file(vec!["N::Chunk { id: String }"]);
         let result = HelixParser::parse_source(&content);
@@ -691,7 +701,9 @@ fn helix_index_and_load() {
         },
     ];
 
-    let temp = std::env::temp_dir().join("helix_test").join(std::process::id().to_string());
+    let temp = std::env::temp_dir()
+        .join("helix_test")
+        .join(std::process::id().to_string());
     let _ = std::fs::remove_dir_all(&temp);
     std::fs::create_dir_all(&temp).expect("create temp dir");
     let path = PathBuf::from(&temp);
@@ -704,8 +716,14 @@ fn helix_index_and_load() {
 
     assert_eq!(loaded.len(), 2, "should load 2 docs from helix");
     let contents: Vec<&str> = loaded.iter().map(|d| d.content.as_str()).collect();
-    assert!(contents.contains(&"hello"), "loaded docs should contain 'hello'");
-    assert!(contents.contains(&"world"), "loaded docs should contain 'world'");
+    assert!(
+        contents.contains(&"hello"),
+        "loaded docs should contain 'hello'"
+    );
+    assert!(
+        contents.contains(&"world"),
+        "loaded docs should contain 'world'"
+    );
 
     let _ = std::fs::remove_dir_all(&temp);
 }

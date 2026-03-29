@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 
 use crate::embed::provider_from_name;
-use crate::helix_store::{helix_hybrid_query, helix_load_all_docs, helix_pack_path_for_local};
-use crate::pack_location::PackLocation;
+use crate::helix_store::{helix_hybrid_query, helix_load_all_docs};
 use crate::pack::load_manifest_from_loc;
-use crate::rerank::{try_create_reranker, DEFAULT_RERANKER_MODEL};
+use crate::pack_location::PackLocation;
+use crate::rerank::{DEFAULT_RERANKER_MODEL, try_create_reranker};
 use crate::types::{QueryGroup, QueryHit, QueryResponse, QueryTimings};
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -42,11 +42,8 @@ pub fn run_query(
     let total_start = Instant::now();
     let manifest = load_manifest_from_loc(loc)?;
     let dim = manifest.embedding.dimension;
-
-    let pack_path = loc
-        .as_path()
-        .ok_or_else(|| anyhow!("Helix build supports local packs only"))?;
-    let index_docs: Vec<_> = helix_load_all_docs(&helix_pack_path_for_local(pack_path), dim)?;
+    let helix_path = loc.helix_path();
+    let index_docs: Vec<_> = helix_load_all_docs(&helix_path, dim)?;
 
     let embed_start = Instant::now();
     let mut provider = provider_from_name(
@@ -69,10 +66,9 @@ pub fn run_query(
     let embed_ms = embed_start.elapsed().as_millis();
 
     let retrieval_start = Instant::now();
-    let path = helix_pack_path_for_local(pack_path);
     let top_for_backend = top_k.saturating_mul(2);
     let mut hits: Vec<QueryHit> =
-        helix_hybrid_query(&path, q, &q_embedding, top_for_backend, path_filter)?;
+        helix_hybrid_query(&helix_path, q, &q_embedding, top_for_backend, path_filter)?;
     let retrieval_results = hits.clone();
     let retrieval_ms = retrieval_start.elapsed().as_millis();
 
@@ -206,7 +202,13 @@ pub fn run_query_multi(
         return Err(anyhow::anyhow!("at least one pack required"));
     }
     if packs.len() == 1 {
-        return run_query(&PackLocation::local(&packs[0]), q, top_k, use_reranker, path_filter);
+        return run_query(
+            &PackLocation::local(&packs[0]),
+            q,
+            top_k,
+            use_reranker,
+            path_filter,
+        );
     }
 
     let total_start = Instant::now();
@@ -219,12 +221,17 @@ pub fn run_query_multi(
                 let loc = PackLocation::local(pack.clone());
                 let q = q.to_string();
                 let pf = path_filter_owned.clone();
-                scope.spawn(move || run_query(&loc, &q, top_for_backend, use_reranker, pf.as_deref()))
+                scope.spawn(move || {
+                    run_query(&loc, &q, top_for_backend, use_reranker, pf.as_deref())
+                })
             })
             .collect();
         handles
             .into_iter()
-            .map(|h| h.join().unwrap_or(Err(anyhow::anyhow!("thread join failed"))))
+            .map(|h| {
+                h.join()
+                    .unwrap_or(Err(anyhow::anyhow!("thread join failed")))
+            })
             .collect::<Result<Vec<_>>>()
     })?;
 
@@ -254,10 +261,7 @@ pub fn run_query_multi(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let grouped_results: Vec<QueryGroup> = all_grouped
-        .into_iter()
-        .take(top_k)
-        .collect();
+    let grouped_results: Vec<QueryGroup> = all_grouped.into_iter().take(top_k).collect();
 
     Ok(QueryResponse {
         results: all_hits,

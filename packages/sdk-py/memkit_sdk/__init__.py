@@ -21,6 +21,7 @@ def memkit(model: str) -> tuple[str, list]:
 def query(
     text: str,
     *,
+    pack_uri: str | None = None,
     top_k: int = 8,
     use_reranker: bool = True,
     raw: bool = False,
@@ -31,6 +32,8 @@ def query(
         "use_reranker": use_reranker,
         "raw": raw,
     }
+    if pack_uri:
+        body["pack_uri"] = pack_uri
     return client_post("/query", body)
 
 

@@ -8,6 +8,10 @@ const CANONICAL_TOOLS = [
       type: "object" as const,
       properties: {
         query: { type: "string" as const, description: "Search query" },
+        pack_uri: {
+          type: "string" as const,
+          description: "Optional cloud pack URI (memkit://users/... or memkit://orgs/...)",
+        },
         top_k: { type: "number" as const, description: "Max results (default 8)" },
         use_reranker: { type: "boolean" as const, description: "Use reranker (default true)" },
       },
@@ -88,14 +92,18 @@ export async function executeToolInternal(
   switch (name) {
     case "memory_query": {
       const query = String(args.query ?? "");
+      const pack_uri =
+        typeof args.pack_uri === "string" ? String(args.pack_uri) : undefined;
       const top_k = Number(args.top_k ?? 8);
       const use_reranker = args.use_reranker !== false;
-      const result = await clientPost("/query", {
+      const body: Record<string, unknown> = {
         query,
         top_k,
         use_reranker,
         raw: false,
-      });
+      };
+      if (pack_uri) body.pack_uri = pack_uri;
+      const result = await clientPost("/query", body);
       return result;
     }
     case "memory_status": {

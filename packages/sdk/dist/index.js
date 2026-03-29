@@ -16,6 +16,9 @@ export async function query(text, options) {
         use_reranker: options?.use_reranker ?? true,
         raw: options?.raw ?? false,
     };
+    if (options?.pack_uri) {
+        body.pack_uri = options.pack_uri;
+    }
     const result = (await clientPost("/query", body));
     return result;
 }

@@ -153,7 +153,10 @@ fn smoke_health_status_add_query_flows() {
         .expect("mcp initialize response")
         .json()
         .expect("mcp initialize json");
-    assert_eq!(initialize.get("jsonrpc").and_then(Value::as_str), Some("2.0"));
+    assert_eq!(
+        initialize.get("jsonrpc").and_then(Value::as_str),
+        Some("2.0")
+    );
     assert_eq!(
         initialize
             .get("result")
@@ -180,7 +183,10 @@ fn smoke_health_status_add_query_flows() {
         .expect("add response");
     assert!(add_resp.status().is_success());
     let add_body: Value = add_resp.json().expect("add json");
-    assert_eq!(add_body.get("status").and_then(Value::as_str), Some("accepted"));
+    assert_eq!(
+        add_body.get("status").and_then(Value::as_str),
+        Some("accepted")
+    );
     assert!(add_body.get("job").is_some());
 
     // Query endpoint should return either success payload or structured error payload.

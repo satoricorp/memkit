@@ -3,7 +3,7 @@
 import { Polar } from '@polar-sh/sdk'
 import { convexAuthNextjsToken } from '@convex-dev/auth/nextjs/server'
 import { fetchQuery } from 'convex/nextjs'
-import { api } from '@/convex/_generated/api'
+import { api } from '@convex-generated/api'
 
 const polar = new Polar({
   serverURL: process.env.NODE_ENV === 'development'

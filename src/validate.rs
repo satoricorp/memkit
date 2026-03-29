@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Rejects ASCII control characters (0x00-0x1F) and DEL (0x7F).
 pub fn reject_control_chars(s: &str) -> Result<()> {
@@ -28,9 +28,10 @@ pub fn validate_path(s: &str) -> Result<PathBuf> {
         ));
     }
     let p = PathBuf::from(s);
-    if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    if p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(anyhow!("invalid path: '..' traversal not allowed"));
     }
     Ok(p)
 }
-

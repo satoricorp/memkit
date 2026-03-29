@@ -3,8 +3,8 @@ use serde::Deserialize;
 
 use std::path::Path;
 
-use crate::types::GraphRelation;
 use crate::ontology::{LlmConfig, OntologyExtraction, OntologyProvider};
+use crate::types::GraphRelation;
 
 #[cfg(feature = "llama-embedded")]
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -95,14 +95,22 @@ Keep at most {max_entities} entities and at most 24 relations. Output JSON only.
     }
 
     /// Run generic prompt completion. Used by ontology extraction and query synthesis.
-    pub fn run_completion(&self, prompt: &str, max_tokens_override: Option<usize>) -> Result<String> {
-        let max_tokens = max_tokens_override.unwrap_or(self.config.max_tokens).max(64);
+    pub fn run_completion(
+        &self,
+        prompt: &str,
+        max_tokens_override: Option<usize>,
+    ) -> Result<String> {
+        let max_tokens = max_tokens_override
+            .unwrap_or(self.config.max_tokens)
+            .max(64);
         #[cfg(feature = "llama-embedded")]
         {
             let backend = llama_backend()?;
             let n_ctx = self.config.n_ctx.max(256).min(32768);
             let mut ctx_params = LlamaContextParams::default()
-                .with_n_ctx(Some(NonZeroU32::new(n_ctx).ok_or_else(|| anyhow!("invalid n_ctx"))?))
+                .with_n_ctx(Some(
+                    NonZeroU32::new(n_ctx).ok_or_else(|| anyhow!("invalid n_ctx"))?,
+                ))
                 .with_n_batch(n_ctx);
             let threads = std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -142,7 +150,9 @@ Keep at most {max_entities} entities and at most 24 relations. Output JSON only.
                 let chunk_end = ((pos as usize) + n_batch).min(prompt_tokens.len());
                 let last_index = (chunk_end - 1) as i32;
                 batch.clear();
-                for (i, token) in (pos..).zip(prompt_tokens[pos as usize..chunk_end].iter().copied()) {
+                for (i, token) in
+                    (pos..).zip(prompt_tokens[pos as usize..chunk_end].iter().copied())
+                {
                     batch
                         .add(token, i, &[0], i == last_index)
                         .map_err(|e| anyhow!("failed adding prompt token to batch: {}", e))?;
@@ -177,7 +187,11 @@ Keep at most {max_entities} entities and at most 24 relations. Output JSON only.
                     .map_err(|e| anyhow!("failed converting token to text: {}", e))?;
                 out.push_str(&piece);
                 // Stop as soon as we generate a "next turn" marker (model continuing the chat pattern).
-                if out.contains("|Human:") || out.contains("|ASSISTANT:") || out.contains("<|user|>") || out.contains("<|assistant|>") {
+                if out.contains("|Human:")
+                    || out.contains("|ASSISTANT:")
+                    || out.contains("<|user|>")
+                    || out.contains("<|assistant|>")
+                {
                     break;
                 }
 
@@ -199,7 +213,9 @@ Keep at most {max_entities} entities and at most 24 relations. Output JSON only.
         #[cfg(not(feature = "llama-embedded"))]
         {
             let llama_cli = resolve_llama_cli_path(&self.config.model);
-            if !llama_cli.exists() && llama_cli.file_name().and_then(|n| n.to_str()) == Some("llama-cli") {
+            if !llama_cli.exists()
+                && llama_cli.file_name().and_then(|n| n.to_str()) == Some("llama-cli")
+            {
                 return Err(anyhow!(
                     "llama-cli not found in PATH and no local binary at .local-runtime/llama-cli. \
                     Build with default features for in-process inference: cargo build (includes llama-embedded), \
@@ -269,18 +285,21 @@ fn llama_backend() -> Result<&'static LlamaBackend> {
     static BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
     static INIT: Once = Once::new();
     static INIT_ERROR: Mutex<Option<anyhow::Error>> = Mutex::new(None);
-    INIT.call_once(|| {
-        match LlamaBackend::init() {
-            Ok(b) => {
-                BACKEND.set(b).ok();
-            }
-            Err(e) => {
-                *INIT_ERROR.lock().unwrap() = Some(anyhow!("failed to initialize llama backend: {}", e));
-            }
+    INIT.call_once(|| match LlamaBackend::init() {
+        Ok(b) => {
+            BACKEND.set(b).ok();
+        }
+        Err(e) => {
+            *INIT_ERROR.lock().unwrap() =
+                Some(anyhow!("failed to initialize llama backend: {}", e));
         }
     });
     BACKEND.get().ok_or_else(|| {
-        INIT_ERROR.lock().unwrap().take().unwrap_or_else(|| anyhow!("unknown init error"))
+        INIT_ERROR
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| anyhow!("unknown init error"))
     })
 }
 

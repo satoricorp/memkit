@@ -140,21 +140,13 @@ pub fn white_word(color: bool, s: &str) -> String {
 /// Bracketed detail for `mk doctor` lines, e.g. `[http://127.0.0.1:4242]` (cyan when color on).
 pub fn bracketed_cyan(color: bool, inner: &str) -> String {
     let s = format!("[{}]", inner);
-    if color {
-        s.cyan().to_string()
-    } else {
-        s
-    }
+    if color { s.cyan().to_string() } else { s }
 }
 
 /// Metrics, counts, host:port (cyan).
 pub fn data_num(color: bool, s: impl Display) -> String {
     let t = s.to_string();
-    if color {
-        t.cyan().to_string()
-    } else {
-        t
-    }
+    if color { t.cyan().to_string() } else { t }
 }
 
 /// Model id in query banners (magenta).

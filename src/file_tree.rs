@@ -13,7 +13,10 @@ fn is_memkit_internal(path: &str) -> bool {
 }
 
 pub fn format_file_tree(paths: &[String], base_path: &str) -> String {
-    let base = base_path.replace('\\', "/").trim_end_matches('/').to_string();
+    let base = base_path
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
     let base_prefix = if base.is_empty() {
         String::new()
     } else {

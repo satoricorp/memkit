@@ -6,9 +6,7 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::pack_location::PackLocation;
-use crate::types::{
-    ChunkingConfig, EmbeddingConfig, FileState, Manifest, SourceConfig,
-};
+use crate::types::{ChunkingConfig, EmbeddingConfig, FileState, Manifest, SourceConfig};
 
 pub fn manifest_path(pack_dir: &Path) -> PathBuf {
     pack_dir.join("manifest.json")
@@ -85,7 +83,9 @@ pub fn load_manifest(pack_dir: &Path) -> Result<Manifest> {
 }
 
 pub fn load_manifest_from_loc(loc: &PackLocation) -> Result<Manifest> {
-    let bytes = loc.read_file("manifest.json").context("manifest.json missing; run `mk add <path>`")?;
+    let bytes = loc
+        .read_file("manifest.json")
+        .context("manifest.json missing; run `mk add <path>`")?;
     let manifest = serde_json::from_slice::<Manifest>(&bytes).context("invalid manifest.json")?;
     Ok(manifest)
 }
@@ -97,7 +97,8 @@ pub fn save_manifest(pack_dir: &Path, manifest: Manifest) -> Result<()> {
 pub fn save_manifest_to_loc(loc: &PackLocation, mut manifest: Manifest) -> Result<()> {
     manifest.updated_at = Utc::now();
     let data = serde_json::to_vec_pretty(&manifest)?;
-    loc.write_file("manifest.json", &data).context("failed writing manifest.json")?;
+    loc.write_file("manifest.json", &data)
+        .context("failed writing manifest.json")?;
     Ok(())
 }
 
@@ -119,7 +120,8 @@ pub fn save_file_state(pack_dir: &Path, states: &[FileState]) -> Result<()> {
 
 pub fn save_file_state_to_loc(loc: &PackLocation, states: &[FileState]) -> Result<()> {
     let data = serde_json::to_vec_pretty(states)?;
-    loc.write_file("state/file_state.json", &data).context("failed writing state/file_state.json")?;
+    loc.write_file("state/file_state.json", &data)
+        .context("failed writing state/file_state.json")?;
     Ok(())
 }
 
@@ -183,7 +185,8 @@ pub fn scrub_pack_from_dir(dir: &Path) -> Result<()> {
         let p = dir.join(name);
         if p.exists() {
             if p.is_dir() {
-                fs::remove_dir_all(&p).with_context(|| format!("failed to remove {}", p.display()))?;
+                fs::remove_dir_all(&p)
+                    .with_context(|| format!("failed to remove {}", p.display()))?;
             } else {
                 fs::remove_file(&p).with_context(|| format!("failed to remove {}", p.display()))?;
             }

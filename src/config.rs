@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 const CONFIG_DIR: &str = "memkit";
 const CONFIG_FILE: &str = "memkit.json";
@@ -18,6 +19,8 @@ const CONFIG_FILE: &str = "memkit.json";
 pub struct MemkitConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<PersistedAuth>,
 }
@@ -151,6 +154,42 @@ pub fn set_model(model_id: &str) -> Result<()> {
     Ok(())
 }
 
+pub const DEFAULT_CLOUD_URL: &str = "https://api.memkit.io";
+
+fn normalize_cloud_url(raw: &str) -> Result<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let parsed = Url::parse(trimmed).context("cloud URL must be a valid absolute URL")?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(trimmed.to_string()),
+        _ => anyhow::bail!("cloud URL must use http or https"),
+    }
+}
+
+pub fn set_cloud_url(url: Option<&str>) -> Result<()> {
+    let mut cfg = load_config()?;
+    cfg.cloud_url = match url {
+        Some(value) => Some(normalize_cloud_url(value)?),
+        None => None,
+    };
+    save_config(&cfg)
+}
+
+pub fn resolve_cloud_url() -> String {
+    if let Ok(url) = std::env::var("MEMKIT_URL") {
+        if let Ok(normalized) = normalize_cloud_url(&url) {
+            return normalized;
+        }
+    }
+    if let Ok(cfg) = load_config() {
+        if let Some(url) = cfg.cloud_url {
+            if let Ok(normalized) = normalize_cloud_url(&url) {
+                return normalized;
+            }
+        }
+    }
+    DEFAULT_CLOUD_URL.to_string()
+}
+
 pub fn set_auth(auth: Option<PersistedAuth>) -> Result<()> {
     let mut cfg = load_config()?;
     cfg.auth = auth;
@@ -250,6 +289,7 @@ mod tests {
 
         let cfg = MemkitConfig {
             model: Some("openai:gpt-5.4".to_string()),
+            cloud_url: Some("https://example.memkit.test".to_string()),
             auth: Some(PersistedAuth {
                 session_token: "session-123".to_string(),
                 jwt: "jwt-123".to_string(),
@@ -264,6 +304,7 @@ mod tests {
         save_config(&cfg).expect("save config");
         let loaded = load_config().expect("load config");
         assert_eq!(loaded.model, cfg.model);
+        assert_eq!(loaded.cloud_url, cfg.cloud_url);
         assert_eq!(loaded.auth, cfg.auth);
 
         #[cfg(unix)]
@@ -285,5 +326,46 @@ mod tests {
                 std::env::remove_var("XDG_CONFIG_HOME");
             },
         }
+    }
+
+    #[test]
+    fn resolve_cloud_url_prefers_env_then_config_then_default() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = unique_temp_dir("memkit-cloud-url-test");
+        std::fs::create_dir_all(&temp).expect("create temp dir");
+        let prior_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        let prior_memkit_url = std::env::var("MEMKIT_URL").ok();
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &temp);
+            std::env::remove_var("MEMKIT_URL");
+        }
+
+        assert_eq!(resolve_cloud_url(), DEFAULT_CLOUD_URL);
+
+        set_cloud_url(Some("https://custom.example.com/")).expect("set config cloud url");
+        assert_eq!(resolve_cloud_url(), "https://custom.example.com");
+
+        unsafe {
+            std::env::set_var("MEMKIT_URL", "https://env.example.com/");
+        }
+        assert_eq!(resolve_cloud_url(), "https://env.example.com");
+
+        match prior_memkit_url {
+            Some(value) => unsafe {
+                std::env::set_var("MEMKIT_URL", value);
+            },
+            None => unsafe {
+                std::env::remove_var("MEMKIT_URL");
+            },
+        }
+        match prior_xdg {
+            Some(value) => unsafe {
+                std::env::set_var("XDG_CONFIG_HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("XDG_CONFIG_HOME");
+            },
+        }
+        let _ = std::fs::remove_dir_all(temp);
     }
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Github, MessageCircle } from "lucide-react";
 import ThemeToggle from "@/components/theme-toggle";
 import { siteConfig } from "@/config";
@@ -24,7 +24,7 @@ function LinkedInLogoIcon() {
 export default function Footer() {
   const [mounted, setMounted] = useState(false);
 
-  const socialIcons: Record<string, JSX.Element> = {
+  const socialIcons: Record<string, ReactNode> = {
     x: <XLogoIcon />,
     github: <Github className="h-4 w-4" />,
     discord: <MessageCircle className="h-4 w-4" />,

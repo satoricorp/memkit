@@ -2,6 +2,7 @@ export interface MemkitConfig {
     url: string;
 }
 export interface QueryOptions {
+    pack_uri?: string;
     top_k?: number;
     raw?: boolean;
     use_reranker?: boolean;

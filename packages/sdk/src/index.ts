@@ -23,6 +23,9 @@ export async function query(
     use_reranker: options?.use_reranker ?? true,
     raw: options?.raw ?? false,
   };
+  if (options?.pack_uri) {
+    body.pack_uri = options.pack_uri;
+  }
   const result = (await clientPost("/query", body)) as QueryResult;
   return result;
 }

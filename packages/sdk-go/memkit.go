@@ -39,10 +39,13 @@ func Query(ctx context.Context, text string, opts *QueryOpts) (map[string]any, e
 		raw = opts.Raw
 	}
 	body := map[string]any{
-		"query":         text,
-		"top_k":         topK,
-		"use_reranker":  useReranker,
-		"raw":           raw,
+		"query":        text,
+		"top_k":        topK,
+		"use_reranker": useReranker,
+		"raw":          raw,
+	}
+	if opts != nil && opts.PackURI != "" {
+		body["pack_uri"] = opts.PackURI
 	}
 	return clientPost(ctx, "/query", body)
 }

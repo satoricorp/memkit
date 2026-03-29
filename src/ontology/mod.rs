@@ -12,9 +12,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::types::GraphRelation;
 #[cfg(feature = "llama-embedded")]
 use crate::ontology_llama::LlamaOntologyProvider;
+use crate::types::GraphRelation;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OntologyEntity {
@@ -117,9 +117,7 @@ impl LlmConfig {
         let provider = OntologyProviderKind::from_env();
         let model = std::env::var("MEMKIT_LLM_MODEL")
             .or_else(|_| std::env::var("MEMKIT_ONTOLOGY_MODEL"))
-            .unwrap_or_else(|_| {
-                ".local-runtime/models/qwen2.5-2b-instruct-Q8_0.gguf".to_string()
-            });
+            .unwrap_or_else(|_| ".local-runtime/models/qwen2.5-2b-instruct-Q8_0.gguf".to_string());
         let model = resolve_model_path(&model);
         let max_tokens = std::env::var("MEMKIT_LLM_MAX_TOKENS")
             .or_else(|_| std::env::var("MEMKIT_ONTOLOGY_MAX_TOKENS"))
@@ -340,7 +338,6 @@ impl OntologyEngine {
             .context("failed to write ontology artifact")?;
         Ok(artifact_path)
     }
-
 }
 
 fn extract_entities(content: &str, max_entities: usize) -> Vec<String> {

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { convexAuthNextjsToken, isAuthenticatedNextjs } from '@convex-dev/auth/nextjs/server'
-import { api } from '@/convex/_generated/api'
+import { api } from '@convex-generated/api'
 import { Polar } from '@polar-sh/sdk'
 import { fetchAction, fetchQuery } from 'convex/nextjs'
 const POLAR_PRODUCT_ID = process.env.POLAR_PRODUCT_ID ?? ''

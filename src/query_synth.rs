@@ -75,11 +75,7 @@ pub async fn synthesize_answer_async(
 fn build_prompt_inner(query: &str, response: &QueryResponse) -> String {
     let mut context = String::with_capacity(MAX_CONTEXT_CHARS + 512);
     for hit in response.results.iter().take(MAX_CHUNKS) {
-        let block = format!(
-            "{}\n(source: {})\n---\n",
-            hit.content.trim(),
-            hit.file_path
-        );
+        let block = format!("{}\n(source: {})\n---\n", hit.content.trim(), hit.file_path);
         if context.len() + block.len() > MAX_CONTEXT_CHARS {
             break;
         }
@@ -144,7 +140,10 @@ fn strip_template_tokens(s: &str) -> String {
     let mut out = s.to_string();
     while let Some(start) = out.find("|<|") {
         let rest = &out[start..];
-        let end = rest.find("|>|").map(|i| start + i + 3).or_else(|| rest.find(">|").map(|i| start + i + 2));
+        let end = rest
+            .find("|>|")
+            .map(|i| start + i + 3)
+            .or_else(|| rest.find(">|").map(|i| start + i + 2));
         if let Some(e) = end {
             out.replace_range(start..e, " ");
         } else {
@@ -153,7 +152,10 @@ fn strip_template_tokens(s: &str) -> String {
     }
     while let Some(start) = out.find("<|") {
         let rest = &out[start..];
-        let end = rest.find("|>").map(|i| start + i + 2).or_else(|| rest.find(">|").map(|i| start + i + 2));
+        let end = rest
+            .find("|>")
+            .map(|i| start + i + 2)
+            .or_else(|| rest.find(">|").map(|i| start + i + 2));
         if let Some(e) = end {
             out.replace_range(start..e, " ");
         } else {
@@ -161,7 +163,11 @@ fn strip_template_tokens(s: &str) -> String {
         }
     }
     out = out.replace("|_|", " ");
-    out.split_whitespace().collect::<Vec<_>>().join(" ").trim().to_string()
+    out.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
 }
 
 fn cut_at_next_turn(s: &str) -> &str {

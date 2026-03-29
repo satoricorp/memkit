@@ -60,15 +60,25 @@ fn examples_for_command(cmd: &str) -> serde_json::Value {
         "query" => example_list(
             &[
                 "mk query \"how does auth work\" --top-k 12 --no-rerank --pack mypack --raw --output json",
+                "mk query \"what changed?\" --pack pack-id-123 --cloud",
+                "mk query \"what changed?\" --pack memkit://users/123/packs/pack-abc",
             ],
             &[
                 "mk -j '{\"command\":\"query\",\"query\":\"how does auth work\",\"top_k\":8,\"use_reranker\":true,\"raw\":false,\"pack\":\"./memory-pack\"}'",
+                "mk -j '{\"command\":\"query\",\"query\":\"what changed?\",\"pack\":\"pack-id-123\",\"cloud\":true}'",
+                "mk -j '{\"command\":\"query\",\"query\":\"what changed?\",\"pack\":\"memkit://users/123/packs/pack-abc\"}'",
             ],
         ),
         "publish" => example_list(
-            &["mk publish --pack ./memory-pack --destination s3://bucket/prefix"],
             &[
-                "mk -j '{\"command\":\"publish\",\"pack\":\"./memory-pack\",\"destination\":\"s3://bucket/prefix\"}'",
+                "mk publish --pack ./memory-pack",
+                "mk publish --pack ./memory-pack --cloud-pack-id 550e8400-e29b-41d4-a716-446655440000",
+                "mk publish --pack ./memory-pack --pack-uri memkit://users/123/packs/pack-abc --overwrite",
+            ],
+            &[
+                "mk -j '{\"command\":\"publish\",\"pack\":\"./memory-pack\"}'",
+                "mk -j '{\"command\":\"publish\",\"pack\":\"./memory-pack\",\"cloud_pack_id\":\"550e8400-e29b-41d4-a716-446655440000\"}'",
+                "mk -j '{\"command\":\"publish\",\"pack\":\"./memory-pack\",\"pack_uri\":\"memkit://users/123/packs/pack-abc\",\"overwrite\":true}'",
             ],
         ),
         "login" => example_list(
@@ -84,10 +94,15 @@ fn examples_for_command(cmd: &str) -> serde_json::Value {
             &["mk -j '{\"command\":\"whoami\"}'"],
         ),
         "use" => example_list(
-            &["mk use pack ./memory-pack", "mk use model openai:gpt-4"],
             &[
-                "mk -j '{\"command\":\"use\",\"pack\":null,\"model\":null}'",
+                "mk use pack ./memory-pack",
+                "mk use model openai:gpt-4",
+                "mk use cloud https://example.com",
+            ],
+            &[
+                "mk -j '{\"command\":\"use\",\"pack\":null,\"model\":null,\"cloud_url\":null}'",
                 "mk -j '{\"command\":\"use\",\"model\":\"openai:gpt-4\"}'",
+                "mk -j '{\"command\":\"use\",\"cloud_url\":\"https://example.com\"}'",
             ],
         ),
         "list" => example_list(
@@ -212,7 +227,8 @@ pub fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                     "top_k": {"type": "integer", "default": 8},
                     "use_reranker": {"type": "boolean", "default": true},
                     "raw": {"type": "boolean", "default": false},
-                    "pack": {"type": "string", "description": "Pack name or path (optional)"}
+                    "pack": {"type": "string", "description": "Pack name, local path, pack_id, or memkit:// cloud URI (optional)"},
+                    "cloud": {"type": "boolean", "default": false, "description": "When true, prefer the cloud copy for name/pack_id selectors. memkit:// URIs are always cloud."}
                 },
                 "required": ["query"]
             }
@@ -224,7 +240,11 @@ pub fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                 "properties": {
                     "pack": {"type": "string", "description": "Pack name or path"},
                     "path": {"type": "string", "description": "Alias for pack"},
-                    "destination": {"type": "string", "description": "e.g. s3://bucket/prefix"}
+                    "pack_uri": {"type": "string", "description": "Optional cloud URI like memkit://users/<tenant>/packs/<pack-id>"},
+                    "uri": {"type": "string", "description": "Alias for pack_uri"},
+                    "cloud_pack_id": {"type": "string", "description": "Optional UUID to publish the local pack as a new cloud pack identity without changing the local manifest"},
+                    "new_pack_id": {"type": "string", "description": "Alias for cloud_pack_id"},
+                    "overwrite": {"type": "boolean", "default": false}
                 }
             }
         }),
@@ -259,10 +279,11 @@ pub fn schema_for_command(cmd: &str) -> Option<serde_json::Value> {
             "command": "use",
             "input": {
                 "type": "object",
-                "description": "Omit both pack and model to show defaults for both. Use null for pack or model to show only that field; use a string to set. Shell: only mk use pack <name> and mk use model <id> (set).",
+                "description": "Omit pack, model, and cloud_url to show all defaults. Use null for any field to show only that field; use a string to set. Shell: mk use pack <name>, mk use model <id>, or mk use cloud <url|default>.",
                 "properties": {
                     "pack": {"description": "null = show default pack; string = set default pack by name or path"},
-                    "model": {"description": "null = show default model; string = set (e.g. openai:gpt-5.4)"}
+                    "model": {"description": "null = show default model; string = set (e.g. openai:gpt-5.4)"},
+                    "cloud_url": {"description": "null = show effective cloud deployment URL; string = set it; use \"default\" in shell mode to reset to the memkit deployment"}
                 }
             }
         }),
@@ -402,7 +423,8 @@ fn input_json_schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                     "top_k": { "type": "integer", "minimum": 1, "default": 8 },
                     "use_reranker": { "type": "boolean", "default": true },
                     "raw": { "type": "boolean", "default": false },
-                    "pack": { "type": "string" }
+                    "pack": { "type": "string" },
+                    "cloud": { "type": "boolean", "default": false }
                 },
                 "required": ["query"],
                 "additionalProperties": false
@@ -413,6 +435,10 @@ fn input_json_schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                 "use_reranker": false,
                 "raw": true,
                 "pack": "./memory-pack"
+            }), json!({
+                "query": "what changed?",
+                "pack": "pack-id-123",
+                "cloud": true
             })],
         ),
         "publish" => json_schema_attach_examples(
@@ -423,12 +449,20 @@ fn input_json_schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                 "properties": {
                     "pack": { "type": "string" },
                     "path": { "type": "string" },
-                    "destination": { "type": "string" }
+                    "pack_uri": { "type": "string" },
+                    "uri": { "type": "string" },
+                    "cloud_pack_id": { "type": "string" },
+                    "new_pack_id": { "type": "string" },
+                    "overwrite": { "type": "boolean" }
                 }
             }),
             vec![json!({
                 "pack": "./memory-pack",
-                "destination": "s3://bucket/prefix"
+                "pack_uri": "memkit://users/123/packs/pack-abc",
+                "overwrite": true
+            }), json!({
+                "pack": "./memory-pack",
+                "cloud_pack_id": "550e8400-e29b-41d4-a716-446655440000"
             })],
         ),
         "login" => json_schema_attach_examples(
@@ -465,12 +499,14 @@ fn input_json_schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                 "type": "object",
                 "properties": {
                     "pack": { "description": "null = show default pack; string = set" },
-                    "model": { "description": "null = show default model; string = set (e.g. openai:gpt-5.4)" }
+                    "model": { "description": "null = show default model; string = set (e.g. openai:gpt-5.4)" },
+                    "cloud_url": { "description": "null = show effective cloud URL; string = set" }
                 }
             }),
             vec![
-                json!({ "pack": serde_json::Value::Null, "model": serde_json::Value::Null }),
+                json!({ "pack": serde_json::Value::Null, "model": serde_json::Value::Null, "cloud_url": serde_json::Value::Null }),
                 json!({ "model": "openai:gpt-4" }),
+                json!({ "cloud_url": "https://example.com" }),
             ],
         ),
         "list" => json_schema_attach_examples(

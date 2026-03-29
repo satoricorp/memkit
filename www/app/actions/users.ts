@@ -1,7 +1,7 @@
 'use server'
 
 import { convexAuthNextjsToken } from '@convex-dev/auth/nextjs/server'
-import { api } from '@/convex/_generated/api'
+import { api } from '@convex-generated/api'
 import { UserCreationResponse } from '@/types/platform'
 import { fetchAction } from 'convex/nextjs'
 

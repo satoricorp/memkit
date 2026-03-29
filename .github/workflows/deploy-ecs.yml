@@ -99,6 +99,7 @@ jobs:
       CDK_SERVICE_NAME: ${{ vars.CDK_SERVICE_NAME || vars.ECS_SERVICE || 'memkit-api' }}
       CDK_CONTAINER_NAME: ${{ vars.CDK_CONTAINER_NAME || vars.ECS_CONTAINER_NAME || 'memkit-api' }}
       CDK_INITIAL_IMAGE_TAG: ${{ vars.CDK_INITIAL_IMAGE_TAG || 'bootstrap' }}
+      CDK_ACM_CERTIFICATE_ARN: ${{ vars.CDK_ACM_CERTIFICATE_ARN }}
       CDK_CPU: ${{ vars.CDK_CPU || '2048' }}
       CDK_MEMORY_LIMIT_MIB: ${{ vars.CDK_MEMORY_LIMIT_MIB || '4096' }}
       CDK_EPHEMERAL_STORAGE_GIB: ${{ vars.CDK_EPHEMERAL_STORAGE_GIB || '100' }}

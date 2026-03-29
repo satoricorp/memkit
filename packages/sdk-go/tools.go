@@ -13,9 +13,10 @@ var canonicalTools = []map[string]any{
 		"parameters": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"query":         map[string]any{"type": "string", "description": "Search query"},
-				"top_k":         map[string]any{"type": "number", "description": "Max results (default 8)"},
-				"use_reranker":  map[string]any{"type": "boolean", "description": "Use reranker (default true)"},
+				"query":        map[string]any{"type": "string", "description": "Search query"},
+				"pack_uri":     map[string]any{"type": "string", "description": "Optional cloud pack URI (memkit://users/... or memkit://orgs/...)"},
+				"top_k":        map[string]any{"type": "number", "description": "Max results (default 8)"},
+				"use_reranker": map[string]any{"type": "boolean", "description": "Use reranker (default true)"},
 			},
 			"required": []any{"query"},
 		},
@@ -82,7 +83,7 @@ func GetToolsForProvider(provider string) []any {
 				"function": map[string]any{
 					"name":        t["name"],
 					"description": t["description"],
-					"parameters": t["parameters"],
+					"parameters":  t["parameters"],
 				},
 			}
 		}
@@ -109,12 +110,16 @@ func executeToolInternal(ctx context.Context, name string, args map[string]any) 
 				useReranker = b
 			}
 		}
-		return clientPost(ctx, "/query", map[string]any{
-			"query":         query,
-			"top_k":         topK,
-			"use_reranker":  useReranker,
-			"raw":           false,
-		})
+		body := map[string]any{
+			"query":        query,
+			"top_k":        topK,
+			"use_reranker": useReranker,
+			"raw":          false,
+		}
+		if v, ok := args["pack_uri"]; ok && v != nil {
+			body["pack_uri"] = toString(v)
+		}
+		return clientPost(ctx, "/query", body)
 	case "memory_status":
 		return clientGet(ctx, "/status")
 	case "memory_sources":

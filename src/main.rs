@@ -234,8 +234,10 @@ fn resolve_pack_root(pack_arg: Option<&str>) -> Result<PathBuf> {
     if let Some(ref default) = reg.default_path {
         return Ok(PathBuf::from(default));
     }
-    if let Some(p) = reg.packs.first() {
-        return Ok(PathBuf::from(&p.path));
+    if let Some(p) = reg.packs.iter().find(|p| p.local_path().is_some()) {
+        if let Some(local_path) = p.local_path() {
+            return Ok(PathBuf::from(local_path));
+        }
     }
     if let Some(home) = dirs::home_dir() {
         if has_manifest_at(&home) {
@@ -281,24 +283,6 @@ fn ensure_pack_root(pack_arg: Option<&str>) -> Result<PathBuf> {
     resolve_pack_root(pack_arg)
 }
 
-/// Whether the resolved pack is registered as cloud (skip `file://` links for local CLI).
-fn pack_cloud_for_cli(pack_arg: Option<&str>) -> bool {
-    let Ok(root) = ensure_pack_root(pack_arg) else {
-        return false;
-    };
-    let norm = root.canonicalize().unwrap_or(root);
-    let reg = load_registry().unwrap_or_default();
-    for p in &reg.packs {
-        let Ok(entry_path) = PathBuf::from(&p.path).canonicalize() else {
-            continue;
-        };
-        if entry_path == norm {
-            return p.cloud;
-        }
-    }
-    false
-}
-
 fn parse_pack_paths(value: &str) -> Vec<PathBuf> {
     value
         .split(',')
@@ -316,21 +300,23 @@ fn parse_use_field_json(v: Option<&serde_json::Value>) -> Result<UseField> {
         None => Ok(UseField::Absent),
         Some(serde_json::Value::Null) => Ok(UseField::Show),
         Some(serde_json::Value::String(s)) => Ok(UseField::Set(s.clone())),
-        _ => Err(anyhow!("use: pack and model must be null or a string")),
+        _ => Err(anyhow!("use: pack, model, and cloud_url must be null or a string")),
     }
 }
 
-/// `{"command":"use"}` with optional `"pack"` / `"model"` (null = show, string = set).
+/// `{"command":"use"}` with optional `"pack"` / `"model"` / `"cloud_url"` (null = show, string = set).
 fn cli_use_from_json(j: &serde_json::Value) -> Result<CliCommand> {
     let obj = j
         .as_object()
         .ok_or_else(|| anyhow!("--json must be a JSON object"))?;
     let has_pack = obj.contains_key("pack");
     let has_model = obj.contains_key("model");
-    if !has_pack && !has_model {
+    let has_cloud_url = obj.contains_key("cloud_url");
+    if !has_pack && !has_model && !has_cloud_url {
         return Ok(CliCommand::Use(UseSpec {
             pack: UseField::Show,
             model: UseField::Show,
+            cloud_url: UseField::Show,
         }));
     }
     Ok(CliCommand::Use(UseSpec {
@@ -341,6 +327,11 @@ fn cli_use_from_json(j: &serde_json::Value) -> Result<CliCommand> {
         },
         model: if has_model {
             parse_use_field_json(obj.get("model"))?
+        } else {
+            UseField::Absent
+        },
+        cloud_url: if has_cloud_url {
+            parse_use_field_json(obj.get("cloud_url"))?
         } else {
             UseField::Absent
         },
@@ -522,17 +513,23 @@ fn cli_command_from_json(cmd: &str, j: &serde_json::Value) -> Result<CliCommand>
             let use_reranker = get_bool("use_reranker").unwrap_or(true);
             let raw = get_bool("raw").unwrap_or(false);
             let pack = get_str("pack");
+            let cloud = get_bool("cloud").unwrap_or(false);
             Ok(CliCommand::Query {
                 query,
                 top_k,
                 use_reranker,
                 raw,
                 pack,
+                cloud,
             })
         }
         "publish" => Ok(CliCommand::Publish {
             pack: get_str("pack").or_else(|| get_str("path")),
-            destination: get_str("destination"),
+            pack_uri: get_str("pack_uri")
+                .or_else(|| get_str("uri"))
+                .or_else(|| get_str("destination")),
+            cloud_pack_id: get_str("cloud_pack_id").or_else(|| get_str("new_pack_id")),
+            overwrite: get_bool("overwrite").unwrap_or(false),
         }),
         "login" => Ok(CliCommand::Login),
         "logout" => Ok(CliCommand::Logout),
@@ -664,7 +661,7 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
             let rest = &args[1..];
             if rest.is_empty() {
                 return Err(anyhow!(
-                    "usage: mk query <text> [--top-k N] [--no-rerank] [--pack <name-or-path>] [--raw] — or mk --json '{{\"command\":\"query\",\"query\":\"...\"}}'"
+                    "usage: mk query <text> [--top-k N] [--no-rerank] [--pack <name|path|pack-id|memkit-uri>] [--cloud] [--raw] — or mk --json '{{\"command\":\"query\",\"query\":\"...\"}}'"
                 ));
             }
             let query = rest[0].clone();
@@ -673,6 +670,7 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
             let mut use_reranker = true;
             let mut raw = false;
             let mut pack = None;
+            let mut cloud = false;
             let mut i = 1usize;
             while i < rest.len() {
                 match rest[i].as_str() {
@@ -693,6 +691,7 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
                         i += 1;
                         pack = rest.get(i).cloned();
                     }
+                    "--cloud" => cloud = true,
                     "--raw" => raw = true,
                     other => return Err(anyhow!("unsupported query argument: {}", other)),
                 }
@@ -704,13 +703,26 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
                 use_reranker,
                 raw,
                 pack,
+                cloud,
             })
         }
         "publish" => {
             let rest = &args[1..];
             let pack = flag_value(rest, "--pack");
-            let destination = flag_value(rest, "--destination");
-            Ok(CliCommand::Publish { pack, destination })
+            let pack_uri = flag_value(rest, "--pack-uri")
+                .or_else(|| flag_value(rest, "--uri"))
+                .or_else(|| flag_value(rest, "--destination"));
+            let cloud_pack_id = flag_value(rest, "--cloud-pack-id")
+                .or_else(|| flag_value(rest, "--new-pack-id"));
+            let overwrite = rest
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "--overwrite" | "--force"));
+            Ok(CliCommand::Publish {
+                pack,
+                pack_uri,
+                cloud_pack_id,
+                overwrite,
+            })
         }
         "login" => Ok(CliCommand::Login),
         "logout" => Ok(CliCommand::Logout),
@@ -733,20 +745,27 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
             }
             if rest.len() != 2 {
                 return Err(anyhow!(
-                    "usage: mk use pack <name-or-path> | mk use model <model-id> — run `mk list` for current defaults"
+                    "usage: mk use pack <name-or-path> | mk use model <model-id> | mk use cloud <url|default> — run `mk list` for current defaults"
                 ));
             }
             match rest[0].as_str() {
                 "pack" => Ok(CliCommand::Use(UseSpec {
                     pack: UseField::Set(rest[1].clone()),
                     model: UseField::Absent,
+                    cloud_url: UseField::Absent,
                 })),
                 "model" => Ok(CliCommand::Use(UseSpec {
                     pack: UseField::Absent,
                     model: UseField::Set(rest[1].clone()),
+                    cloud_url: UseField::Absent,
+                })),
+                "cloud" => Ok(CliCommand::Use(UseSpec {
+                    pack: UseField::Absent,
+                    model: UseField::Absent,
+                    cloud_url: UseField::Set(rest[1].clone()),
                 })),
                 _ => Err(anyhow!(
-                    "usage: mk use pack <name-or-path> | mk use model <model-id> — run `mk list` for current defaults"
+                    "usage: mk use pack <name-or-path> | mk use model <model-id> | mk use cloud <url|default> — run `mk list` for current defaults"
                 )),
             }
         }
@@ -799,12 +818,15 @@ fn run_use(spec: &UseSpec) -> Result<()> {
         UseField::Show => {
             let reg = load_registry()?;
             if let Some(ref default_path) = reg.default_path {
-                let default_pack = reg.packs.iter().find(|p| p.path == *default_path);
+                let default_pack = reg
+                    .packs
+                    .iter()
+                    .find(|p| p.local_path() == Some(default_path.as_str()));
                 let (name, path) = default_pack
                     .map(|p| {
                         (
-                            p.name.as_deref().unwrap_or(p.path.as_str()),
-                            p.path.as_str(),
+                            p.name.as_deref().unwrap_or(p.registry_key()),
+                            p.registry_key(),
                         )
                     })
                     .unwrap_or((default_path.as_str(), default_path.as_str()));
@@ -852,6 +874,33 @@ fn run_use(spec: &UseSpec) -> Result<()> {
                     crate::term::style_stdout("No default model set", |s| s.yellow().to_string())
                 );
             }
+        }
+        UseField::Absent => {}
+    }
+    match &spec.cloud_url {
+        UseField::Set(url) => {
+            if url == "default" {
+                config::set_cloud_url(None)?;
+                println!(
+                    "{} {}",
+                    crate::term::style_stdout("Cloud URL reset to", |s| s.green().to_string()),
+                    config::DEFAULT_CLOUD_URL
+                );
+            } else {
+                config::set_cloud_url(Some(url))?;
+                println!(
+                    "{} {}",
+                    crate::term::style_stdout("Cloud URL set to", |s| s.green().to_string()),
+                    config::resolve_cloud_url()
+                );
+            }
+        }
+        UseField::Show => {
+            println!(
+                "{} {}",
+                crate::term::style_stdout("Cloud URL:", |s| s.bold().to_string()),
+                config::resolve_cloud_url()
+            );
         }
         UseField::Absent => {}
     }
@@ -949,13 +998,13 @@ fn print_help() {
     print_help_cmd_line_grouped(
         c,
         "publish",
-        " [--pack <name-or-path>] [--destination s3://bucket/prefix]",
+        " [--pack <name-or-path>] [--pack-uri memkit://users/<tenant>/packs/<pack-id>] [--cloud-pack-id <uuid>] [--overwrite]",
     );
     print_help_section(c, "Search", false);
     print_help_cmd_line_grouped(
         c,
         "query",
-        " <text> [--top-k N] [--no-rerank] [--pack <name-or-path>] [--raw]",
+        " <text> [--top-k N] [--no-rerank] [--pack <name|path|pack-id|memkit-uri>] [--cloud] [--raw]",
     );
     print_help_section(c, "Defaults", false);
     print_help_cmd_line_grouped(
@@ -965,6 +1014,7 @@ fn print_help() {
     );
     print_help_cmd_line_grouped(c, "use pack", " <name-or-path>   (set default pack)");
     print_help_cmd_line_grouped(c, "use model", " <model-id>   (set default model)");
+    print_help_cmd_line_grouped(c, "use cloud", " <url|default>   (set cloud deployment URL)");
     print_help_section(c, "Auth", false);
     print_help_cmd_line_grouped(c, "login", "   (browser sign-in via MEMKIT_AUTH_BASE_URL)");
     print_help_cmd_line_grouped(c, "logout", "   (clear local auth + revoke remote session)");
@@ -1354,26 +1404,29 @@ async fn run() -> Result<()> {
                 _ => {}
             }
 
-            let commands_need_server = !matches!(
-                &cmd,
+            let commands_need_server = match &cmd {
                 CliCommand::Help
-                    | CliCommand::Version
-                    | CliCommand::Schema { .. }
-                    | CliCommand::Login
-                    | CliCommand::Logout
-                    | CliCommand::WhoAmI
-                    | CliCommand::Use(_)
-                    | CliCommand::Doctor
-                    | CliCommand::Serve { .. }
-                    | CliCommand::Stop { .. }
-            );
+                | CliCommand::Version
+                | CliCommand::Schema { .. }
+                | CliCommand::Login
+                | CliCommand::Logout
+                | CliCommand::WhoAmI
+                | CliCommand::Use(_)
+                | CliCommand::Doctor
+                | CliCommand::Serve { .. }
+                | CliCommand::Stop { .. }
+                | CliCommand::Publish { .. }
+                | CliCommand::List
+                | CliCommand::Status { dir: None }
+                | CliCommand::Query { .. } => false,
+                _ => true,
+            };
             if matches!(&cmd, CliCommand::Doctor) {
                 cli_client::print_server_note_doctor(&cfg, ctx.output_format == OutputFormat::Json)
                     .await;
             }
             if commands_need_server {
-                let readonly_no_autostart =
-                    matches!(&cmd, CliCommand::Status { .. } | CliCommand::List);
+                let readonly_no_autostart = matches!(&cmd, CliCommand::Status { .. });
                 if readonly_no_autostart {
                     cli_client::require_server_running(&cfg).await?;
                 } else {
@@ -1607,11 +1660,18 @@ async fn run() -> Result<()> {
                     }
                     Ok(CommandOut::Done)
                 }
-                CliCommand::Publish { pack, destination } => {
+                CliCommand::Publish {
+                    pack,
+                    pack_uri,
+                    cloud_pack_id,
+                    overwrite,
+                } => {
                     let out = cli_client::publish(
                         &cfg,
                         pack.as_deref(),
-                        destination.as_deref(),
+                        pack_uri.as_deref(),
+                        cloud_pack_id.as_deref(),
+                        overwrite,
                         ctx.output_format == OutputFormat::Json,
                     )
                     .await?;
@@ -1626,8 +1686,8 @@ async fn run() -> Result<()> {
                     use_reranker,
                     raw,
                     pack,
+                    cloud,
                 } => {
-                    let pack_cloud = pack_cloud_for_cli(pack.as_deref());
                     let out = cli_client::query(
                         &cfg,
                         &QueryArgs {
@@ -1635,10 +1695,13 @@ async fn run() -> Result<()> {
                             top_k,
                             use_reranker,
                             raw,
+                            cloud,
                         },
                         pack.as_deref(),
                     )
                     .await?;
+                    let pack_cloud =
+                        out.get("pack_origin").and_then(serde_json::Value::as_str) == Some("cloud");
                     let use_formatted = !raw && ctx.output_format != OutputFormat::Json;
                     if use_formatted {
                         if let Some(synth_err) = out

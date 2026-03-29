@@ -23,6 +23,7 @@ pub enum UseField {
 pub struct UseSpec {
     pub pack: UseField,
     pub model: UseField,
+    pub cloud_url: UseField,
 }
 
 pub enum CliCommand {
@@ -46,6 +47,7 @@ pub enum CliCommand {
         use_reranker: bool,
         raw: bool,
         pack: Option<String>,
+        cloud: bool,
     },
     Schema {
         command: Option<String>,
@@ -53,7 +55,9 @@ pub enum CliCommand {
     },
     Publish {
         pack: Option<String>,
-        destination: Option<String>,
+        pack_uri: Option<String>,
+        cloud_pack_id: Option<String>,
+        overwrite: bool,
     },
     Login,
     Logout,

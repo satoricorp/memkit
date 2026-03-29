@@ -8,6 +8,10 @@ CANONICAL_TOOLS = [
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query"},
+                "pack_uri": {
+                    "type": "string",
+                    "description": "Optional cloud pack URI (memkit://users/... or memkit://orgs/...)",
+                },
                 "top_k": {"type": "number", "description": "Max results (default 8)"},
                 "use_reranker": {"type": "boolean", "description": "Use reranker (default true)"},
             },
@@ -81,12 +85,13 @@ def execute_tool_internal(name: str, args: dict) -> dict | str:
     match name:
         case "memory_query":
             query = str(args.get("query", ""))
+            pack_uri = args.get("pack_uri")
             top_k = int(args.get("top_k", 8))
             use_reranker = args.get("use_reranker", True) is not False
-            return client_post(
-                "/query",
-                {"query": query, "top_k": top_k, "use_reranker": use_reranker, "raw": False},
-            )
+            body = {"query": query, "top_k": top_k, "use_reranker": use_reranker, "raw": False}
+            if pack_uri:
+                body["pack_uri"] = str(pack_uri)
+            return client_post("/query", body)
         case "memory_status":
             return client_get("/status")
         case "memory_sources":

@@ -209,11 +209,6 @@ pub fn read_current_pointer(uri: &CloudPackUri, cloud_root: &Path) -> Result<Clo
     read_json_file(&uri.current_path(cloud_root))
 }
 
-pub fn current_revision_root(uri: &CloudPackUri, cloud_root: &Path) -> Result<PathBuf> {
-    let current = read_current_pointer(uri, cloud_root)?;
-    Ok(uri.revision_root(cloud_root, &current.revision))
-}
-
 pub fn summarize_cloud_pack(uri: &CloudPackUri, cloud_root: &Path) -> Result<CloudPackSummary> {
     let metadata = read_pack_metadata(uri, cloud_root)?;
     let current = read_current_pointer(uri, cloud_root).ok();

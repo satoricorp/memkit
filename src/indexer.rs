@@ -9,13 +9,12 @@ use walkdir::WalkDir;
 
 use crate::embed::provider_from_name;
 use crate::helix_store::{
-    helix_clear_entity_map, helix_load_entity_id_map, helix_load_all_docs, helix_pack_path_for_local,
-    helix_rebuild_chunks, helix_write_entities_edges, helix_write_graph_stats,
+    helix_clear_entity_map, helix_load_all_docs, helix_load_entity_id_map,
+    helix_pack_path_for_local, helix_rebuild_chunks, helix_write_entities_edges,
+    helix_write_graph_stats,
 };
 use crate::ontology::OntologyEngine;
-use crate::pack::{
-    load_file_state, load_manifest, save_file_state, save_manifest,
-};
+use crate::pack::{load_file_state, load_manifest, save_file_state, save_manifest};
 use crate::types::{FileState, SourceConfig, SourceDoc};
 
 fn is_indexable_file(path: &Path) -> bool {
@@ -113,11 +112,16 @@ fn to_source_configs(pack_dir: &Path, sources: &[PathBuf]) -> Vec<SourceConfig> 
         .collect()
 }
 
-pub fn run_index(pack_dir: &Path, sources: &[PathBuf]) -> Result<(usize, usize, usize, Vec<String>)> {
+pub fn run_index(
+    pack_dir: &Path,
+    sources: &[PathBuf],
+) -> Result<(usize, usize, usize, Vec<String>)> {
     let mut manifest = load_manifest(pack_dir)?;
     manifest.sources = to_source_configs(pack_dir, sources);
-    let existing_docs: Vec<_> =
-        helix_load_all_docs(&helix_pack_path_for_local(pack_dir), manifest.embedding.dimension)?;
+    let existing_docs: Vec<_> = helix_load_all_docs(
+        &helix_pack_path_for_local(pack_dir),
+        manifest.embedding.dimension,
+    )?;
     let existing_by_chunk: HashMap<String, SourceDoc> = existing_docs
         .into_iter()
         .map(|d| (d.chunk_id.clone(), d))
@@ -183,7 +187,9 @@ pub fn run_index(pack_dir: &Path, sources: &[PathBuf]) -> Result<(usize, usize, 
                 if likely_binary_issue || (is_indexable_file(path) && size > 0) {
                     if index_warnings.len() < 200 {
                         let detail = match ext.as_deref() {
-                            Some("pdf") => "skipped (PDF: unreadable, encrypted, invalid stream, or empty—pdf-extract often fails on bad streams)",
+                            Some("pdf") => {
+                                "skipped (PDF: unreadable, encrypted, invalid stream, or empty—pdf-extract often fails on bad streams)"
+                            }
                             Some("doc" | "docx" | "xls" | "xlsx" | "xlsb") => {
                                 "skipped (office file could not be read or is empty)"
                             }
@@ -290,52 +296,59 @@ pub fn run_index(pack_dir: &Path, sources: &[PathBuf]) -> Result<(usize, usize, 
     }
 
     helix_rebuild_chunks(
-            &helix_pack_path_for_local(pack_dir),
-            &next_docs,
-            manifest.embedding.dimension,
-        )
-        .context("failed to rebuild helix store")?;
+        &helix_pack_path_for_local(pack_dir),
+        &next_docs,
+        manifest.embedding.dimension,
+    )
+    .context("failed to rebuild helix store")?;
     helix_clear_entity_map(pack_dir);
     save_file_state(pack_dir, &next_states).context("failed to persist file state")?;
 
     let mut ontology = OntologyEngine::new(pack_dir)?;
     let mut all_entities = HashSet::new();
-        let mut all_relations = Vec::new();
-        for doc in &next_docs {
-            let extraction = ontology.extract(&doc.content_hash, &doc.content, 12);
-            for e in &extraction.entities {
-                all_entities.insert(e.clone());
-            }
-            all_relations.extend(extraction.relations.clone());
+    let mut all_relations = Vec::new();
+    for doc in &next_docs {
+        let extraction = ontology.extract(&doc.content_hash, &doc.content, 12);
+        for e in &extraction.entities {
+            all_entities.insert(e.clone());
         }
-        let path = helix_pack_path_for_local(pack_dir);
-        let mut entity_map = helix_load_entity_id_map(pack_dir);
-        if let Err(e) =
-            helix_write_entities_edges(&path, pack_dir, &mut entity_map, &all_entities, &all_relations)
-        {
-            crate::term::warn(format!("warning: failed writing entities/edges to helix: {}", e));
-        }
-        let unique_source_paths: Vec<String> = {
-            let mut v: Vec<String> = next_docs.iter().map(|d| d.source_path.clone()).collect();
-            v.sort_unstable();
-            v.dedup();
-            v
-        };
-        let relationship_count_unique = all_relations
-            .iter()
-            .map(|r| (r.source.clone(), r.relation.clone(), r.target.clone()))
-            .collect::<HashSet<_>>()
-            .len();
-        if let Err(e) = helix_write_graph_stats(
-            pack_dir,
-            entity_map.len(),
-            relationship_count_unique,
-            total_chunks,
-            &unique_source_paths,
-            &index_warnings,
-        ) {
-            crate::term::warn(format!("warning: failed writing graph stats: {}", e));
-        }
+        all_relations.extend(extraction.relations.clone());
+    }
+    let path = helix_pack_path_for_local(pack_dir);
+    let mut entity_map = helix_load_entity_id_map(pack_dir);
+    if let Err(e) = helix_write_entities_edges(
+        &path,
+        pack_dir,
+        &mut entity_map,
+        &all_entities,
+        &all_relations,
+    ) {
+        crate::term::warn(format!(
+            "warning: failed writing entities/edges to helix: {}",
+            e
+        ));
+    }
+    let unique_source_paths: Vec<String> = {
+        let mut v: Vec<String> = next_docs.iter().map(|d| d.source_path.clone()).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let relationship_count_unique = all_relations
+        .iter()
+        .map(|r| (r.source.clone(), r.relation.clone(), r.target.clone()))
+        .collect::<HashSet<_>>()
+        .len();
+    if let Err(e) = helix_write_graph_stats(
+        pack_dir,
+        entity_map.len(),
+        relationship_count_unique,
+        total_chunks,
+        &unique_source_paths,
+        &index_warnings,
+    ) {
+        crate::term::warn(format!("warning: failed writing graph stats: {}", e));
+    }
 
     let mut source_contents: HashMap<String, Vec<String>> = HashMap::new();
     let mut source_hashes: HashMap<String, Vec<String>> = HashMap::new();
