@@ -12,7 +12,12 @@
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libgcc-s1 \
+        libgomp1 \
+        libssl3 \
+        libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY target/release/memkit-server /usr/local/bin/memkit-server
