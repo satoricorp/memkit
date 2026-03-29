@@ -86,7 +86,7 @@ jobs:
       cancel-in-progress: false
     env:
       DEPLOY_ENV: ${{ vars.DEPLOY_ENV || 'production' }}
-      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
       STACK_NAME: ${{ vars.STACK_NAME || 'MemkitCloudStack' }}
       ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'memkit-api' }}
       ECS_CLUSTER: ${{ vars.ECS_CLUSTER || 'memkit-api' }}
