@@ -1,55 +1,70 @@
 import type { Metadata } from "next";
-import ConvexAuthProvider from "@/components/convex-auth-provider";
-import { ConvexAuthNextjsServerProvider } from "@convex-dev/auth/nextjs/server";
-import { ThemeProvider } from "@/components/theme-provider";
-import { Geist, Geist_Mono } from "next/font/google";
-import { GeistPixelSquare } from "geist/font/pixel";
 import localFont from "next/font/local";
-import { siteConfig } from "@/config";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
-const geistPixel = GeistPixelSquare;
-
-const flauta = localFont({
-  src: "../public/fonts/flauta.ttf",
-  variable: "--font-flauta",
-  display: "swap",
-});
-
-const appleGaramond = localFont({
+const sans = localFont({
   src: [
     {
-      path: "../public/fonts/AppleGaramond.ttf",
+      path: "../public/fonts/Manrope-Regular.ttf",
+      weight: "400",
       style: "normal",
     },
     {
-      path: "../public/fonts/AppleGaramond-Italic.ttf",
-      style: "italic",
+      path: "../public/fonts/Manrope-Medium.ttf",
+      weight: "500",
+      style: "normal",
+    },
+    {
+      path: "../public/fonts/Manrope-Bold.ttf",
+      weight: "700",
+      style: "normal",
     },
   ],
-  variable: "--font-apple-garamond",
+  variable: "--font-sans",
   display: "swap",
 });
 
-const fkGroteskBlack = localFont({
-  src: "../public/fonts/FKGrotesk-Black.otf",
-  variable: "--font-fk-grotesk-black",
+const serif = localFont({
+  src: "../public/fonts/InstrumentSerif-Regular.ttf",
+  variable: "--font-serif",
   display: "swap",
 });
+
+const mono = localFont({
+  src: [
+    {
+      path: "../public/fonts/IBMPlexMono-Regular.ttf",
+      weight: "400",
+      style: "normal",
+    },
+    {
+      path: "../public/fonts/IBMPlexMono-Medium.ttf",
+      weight: "500",
+      style: "normal",
+    },
+  ],
+  variable: "--font-mono",
+  display: "swap",
+});
+
+const themeInitScript = `
+  (() => {
+    const storageKey = "expect-clone-theme";
+    const root = document.documentElement;
+    const stored = window.localStorage.getItem(storageKey);
+    const theme =
+      stored === "light" || stored === "dark"
+        ? stored
+        : window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light";
+    root.dataset.theme = theme;
+  })();
+`;
 
 export const metadata: Metadata = {
-  title: siteConfig.meta.title,
-  description: siteConfig.meta.description,
+  title: "Expect",
+  description: "Let agents test your code in a real browser.",
 };
 
 export default function RootLayout({
@@ -58,22 +73,14 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} ${geistPixel.variable} ${flauta.variable} ${appleGaramond.variable} ${fkGroteskBlack.variable} antialiased`}
-      >
-        <ConvexAuthNextjsServerProvider>
-          <ConvexAuthProvider>
-            <ThemeProvider
-              attribute="class"
-              defaultTheme="light"
-              enableSystem={true}
-              disableTransitionOnChange
-            >
-              {children}
-            </ThemeProvider>
-          </ConvexAuthProvider>
-        </ConvexAuthNextjsServerProvider>
+    <html
+      lang="en"
+      className={`${sans.variable} ${serif.variable} ${mono.variable}`}
+      suppressHydrationWarning
+    >
+      <body>
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+        {children}
       </body>
     </html>
   );

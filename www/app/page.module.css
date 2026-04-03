@@ -1,0 +1,492 @@
+.page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 0 20px 28px;
+}
+
+.hero {
+  width: min(100%, 330px);
+  margin: 0 auto;
+  padding-top: 18px;
+}
+
+.mockupWrap {
+  position: relative;
+  min-height: 370px;
+  margin: 0 -20px;
+  overflow: hidden;
+}
+
+.glow {
+  position: absolute;
+  inset: 0;
+  border-bottom: 0.5px solid var(--border);
+  background: var(--hero-glow);
+}
+
+.browserFrame {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  width: min(100%, 496px);
+  height: 307px;
+  padding: 76px 0 0 83px;
+  transform: translateX(-50%);
+  border-radius: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.98)),
+    var(--surface);
+  box-shadow:
+    0 -0.5px 0 rgba(0, 0, 0, 0.16) inset,
+    0.5px 0 0 rgba(0, 0, 0, 0.16) inset,
+    -0.5px 0 0 rgba(0, 0, 0, 0.16) inset;
+}
+
+:global(html[data-theme="dark"]) .browserFrame {
+  background:
+    linear-gradient(180deg, rgba(22, 22, 22, 0.9), rgba(9, 9, 9, 1)),
+    var(--surface);
+}
+
+.browserChrome {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  display: flex;
+  gap: 6px;
+}
+
+.browserChrome span {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(216, 216, 216, 0.92);
+}
+
+:global(html[data-theme="dark"]) .browserChrome span {
+  background: rgba(66, 66, 66, 1);
+}
+
+.formStage {
+  width: 198px;
+}
+
+.formLabel {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-serif), serif;
+  font-size: 1.12rem;
+  font-style: italic;
+  line-height: 1.35;
+  letter-spacing: -0.03em;
+}
+
+.formFields {
+  display: grid;
+  gap: 9px;
+  margin-top: 18px;
+}
+
+.formInput {
+  width: 100%;
+  height: 30px;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow:
+    0 0 0 0.5px var(--border-strong),
+    0 1px 5px rgba(0, 0, 0, 0.03);
+}
+
+.formButton {
+  margin-top: 14px;
+}
+
+.formButton span {
+  display: block;
+  width: 67px;
+  height: 24px;
+  border-radius: 999px;
+  background: #e8e8e8;
+}
+
+:global(html[data-theme="dark"]) .formButton span {
+  background: #373737;
+}
+
+.cliCard {
+  position: absolute;
+  top: 70px;
+  right: 18px;
+  width: 226px;
+  padding: 42px 14px 14px;
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 248, 248, 1)),
+    var(--surface-elevated);
+  box-shadow: var(--shadow-card);
+  animation: bob 7s ease-in-out infinite;
+}
+
+:global(html[data-theme="dark"]) .cliCard {
+  background:
+    linear-gradient(180deg, rgba(26, 26, 26, 0.96), rgba(16, 16, 16, 1)),
+    var(--surface-elevated);
+}
+
+.cliBody {
+  position: relative;
+}
+
+.cliPrompt {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 13px;
+  font-family: var(--font-mono), monospace;
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
+.cliPrompt span {
+  color: var(--text-soft);
+}
+
+.taskList {
+  display: grid;
+  gap: 6px;
+}
+
+.taskRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text);
+  font-family: var(--font-mono), monospace;
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
+.taskDot,
+.spinner {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+}
+
+.taskDot {
+  border-radius: 999px;
+}
+
+.spinner {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.spinner::before,
+.spinner::after {
+  content: "";
+  position: absolute;
+  border-radius: 999px;
+}
+
+.spinner::before {
+  inset: 3px;
+  border: 2px solid rgba(227, 227, 227, 0.95);
+}
+
+.spinner::after {
+  inset: 3px;
+  border: 2px solid transparent;
+  border-top-color: #8e8e8e;
+  border-right-color: #8e8e8e;
+}
+
+.spinnerActive::after {
+  animation: spin 900ms linear infinite;
+}
+
+.cliLabel {
+  margin: 16px 0 0;
+  text-align: center;
+  color: var(--text-soft);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+.copy {
+  margin-top: 10px;
+}
+
+.title {
+  margin: 0;
+  max-width: 15ch;
+  color: var(--text);
+  font-family: var(--font-serif), serif;
+  font-size: 2rem;
+  line-height: 1.02;
+  letter-spacing: -0.05em;
+}
+
+.description {
+  max-width: 30ch;
+  margin: 14px 0 0;
+  color: var(--text-soft);
+  font-size: 0.83rem;
+  line-height: 1.6;
+}
+
+.demoButton {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 20px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(250, 250, 250, 1)),
+    var(--surface-elevated);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 0.82rem;
+  transition:
+    transform 140ms ease,
+    opacity 140ms ease;
+}
+
+.demoButton:hover {
+  transform: translateY(-1px);
+}
+
+.install {
+  margin-top: 39px;
+  display: grid;
+  gap: 19px;
+  padding-bottom: 28px;
+}
+
+.installGroup {
+  display: grid;
+  gap: 10px;
+}
+
+.installHeading {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-serif), serif;
+  font-size: 1.15rem;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+}
+
+.commandCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 14px 14px 16px;
+  border-radius: 14px;
+  background: var(--surface-strong);
+  overflow: hidden;
+}
+
+:global(html[data-theme="dark"]) .commandCard {
+  background: linear-gradient(180deg, rgba(21, 21, 21, 1), rgba(15, 15, 15, 1));
+}
+
+.commandText {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-family: var(--font-mono), monospace;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.commandPrompt {
+  flex: 0 0 auto;
+  color: var(--text-soft);
+}
+
+.commandText code {
+  min-width: 0;
+  overflow: auto hidden;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+
+.commandText code::-webkit-scrollbar {
+  display: none;
+}
+
+.copyButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: opacity 140ms ease;
+}
+
+.copyButton:hover {
+  opacity: 0.68;
+}
+
+.copyButton svg {
+  width: 18px;
+  height: 18px;
+}
+
+.footer {
+  width: min(100%, 330px);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.footerLinks {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  color: var(--text);
+  font-size: 0.92rem;
+}
+
+.footerLinks a:hover {
+  text-decoration: underline;
+}
+
+.themeToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.12);
+}
+
+:global(html[data-theme="dark"]) .themeToggle {
+  background: transparent;
+  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.14);
+}
+
+.themeButton,
+.themeButtonActive {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  padding: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  opacity: 0.4;
+  transition: opacity 140ms ease;
+}
+
+.themeButton:hover {
+  opacity: 0.8;
+}
+
+.themeButtonActive {
+  opacity: 1;
+}
+
+.themeButton svg,
+.themeButtonActive svg {
+  width: 15px;
+  height: 15px;
+}
+
+@media (min-width: 640px) {
+  .page {
+    padding: 0 24px 32px;
+  }
+
+  .hero {
+    width: 658px;
+    padding-top: 80px;
+  }
+
+  .mockupWrap {
+    min-height: 390px;
+    margin: 0;
+    overflow: visible;
+  }
+
+  .glow {
+    border: 0.5px solid var(--border);
+    border-radius: 26px;
+  }
+
+  .browserFrame {
+    top: 0;
+    width: 658px;
+    height: 366px;
+    padding: 95px 0 0 116px;
+    border-radius: 26px;
+    box-shadow: 0 0 0 0.5px var(--border) inset;
+  }
+
+  .browserChrome {
+    top: 18px;
+    left: 18px;
+  }
+
+  .formStage {
+    width: 198px;
+  }
+
+  .cliCard {
+    top: 78px;
+    right: 18px;
+    width: 247px;
+    padding-top: 44px;
+  }
+
+  .copy,
+  .install {
+    width: 330px;
+  }
+
+  .copy {
+    margin-top: 8px;
+  }
+
+  .title {
+    font-size: 3rem;
+    line-height: 0.98;
+  }
+
+  .description {
+    margin-top: 12px;
+    font-size: 0.84rem;
+  }
+
+  .install {
+    margin-top: 38px;
+    padding-bottom: 24px;
+  }
+
+  .footer {
+    width: 658px;
+    justify-content: center;
+  }
+}
