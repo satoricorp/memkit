@@ -4,6 +4,8 @@ pub mod cli;
 pub mod cli_client;
 pub mod cloud;
 pub mod config;
+pub mod conversation;
+pub mod conversation_query;
 pub mod embed;
 pub mod extract;
 pub mod file_tree;
@@ -12,7 +14,6 @@ pub mod google;
 pub mod helix_store;
 pub mod indexer;
 pub mod ontology;
-#[cfg(feature = "llama-embedded")]
 pub mod ontology_llama;
 pub mod pack;
 pub mod pack_location;

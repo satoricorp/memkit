@@ -4,6 +4,8 @@ mod cli;
 mod cli_client;
 mod cloud;
 mod config;
+mod conversation;
+mod conversation_query;
 mod embed;
 mod extract;
 mod file_tree;
@@ -12,7 +14,6 @@ mod google;
 mod helix_store;
 mod indexer;
 mod ontology;
-#[cfg(feature = "llama-embedded")]
 mod ontology_llama;
 mod pack;
 mod pack_location;
@@ -300,7 +301,9 @@ fn parse_use_field_json(v: Option<&serde_json::Value>) -> Result<UseField> {
         None => Ok(UseField::Absent),
         Some(serde_json::Value::Null) => Ok(UseField::Show),
         Some(serde_json::Value::String(s)) => Ok(UseField::Set(s.clone())),
-        _ => Err(anyhow!("use: pack, model, and cloud_url must be null or a string")),
+        _ => Err(anyhow!(
+            "use: pack, model, and cloud_url must be null or a string"
+        )),
     }
 }
 
@@ -712,8 +715,8 @@ fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
             let pack_uri = flag_value(rest, "--pack-uri")
                 .or_else(|| flag_value(rest, "--uri"))
                 .or_else(|| flag_value(rest, "--destination"));
-            let cloud_pack_id = flag_value(rest, "--cloud-pack-id")
-                .or_else(|| flag_value(rest, "--new-pack-id"));
+            let cloud_pack_id =
+                flag_value(rest, "--cloud-pack-id").or_else(|| flag_value(rest, "--new-pack-id"));
             let overwrite = rest
                 .iter()
                 .any(|arg| matches!(arg.as_str(), "--overwrite" | "--force"));
@@ -1014,7 +1017,11 @@ fn print_help() {
     );
     print_help_cmd_line_grouped(c, "use pack", " <name-or-path>   (set default pack)");
     print_help_cmd_line_grouped(c, "use model", " <model-id>   (set default model)");
-    print_help_cmd_line_grouped(c, "use cloud", " <url|default>   (set cloud deployment URL)");
+    print_help_cmd_line_grouped(
+        c,
+        "use cloud",
+        " <url|default>   (set cloud deployment URL)",
+    );
     print_help_section(c, "Auth", false);
     print_help_cmd_line_grouped(c, "login", "   (browser sign-in via MEMKIT_AUTH_BASE_URL)");
     print_help_cmd_line_grouped(c, "logout", "   (clear local auth + revoke remote session)");
@@ -1166,7 +1173,8 @@ fn load_env_file_fallback() {
             if i >= 1 {
                 let trimmed = line.trim_start();
                 if let Some(first) = trimmed.chars().next() {
-                    if (first.is_ascii_alphabetic() || first == '_') && parse_key(trimmed).is_some() {
+                    if (first.is_ascii_alphabetic() || first == '_') && parse_key(trimmed).is_some()
+                    {
                         value_end = offset;
                         break;
                     }
@@ -1210,7 +1218,10 @@ fn load_env_file_fallback() {
                         .find('\n')
                         .map(|offset| after_prefix + offset)
                         .unwrap_or(content.len());
-                    (&content[after_prefix..value_end], value_end.saturating_sub(after_prefix))
+                    (
+                        &content[after_prefix..value_end],
+                        value_end.saturating_sub(after_prefix),
+                    )
                 };
                 entries.push((key.to_string(), decode_value(raw_value)));
                 index = after_prefix + consumed_len;
