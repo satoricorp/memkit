@@ -268,6 +268,7 @@ pub fn run_index(
                     content_hash: hash.clone(),
                     embedding,
                     indexed_at: Utc::now(),
+                    memory: crate::types::MemoryMetadata::default(),
                 };
                 next_docs.push(doc.clone());
                 changed_docs.push(doc);
@@ -304,6 +305,30 @@ pub fn run_index(
     helix_clear_entity_map(pack_dir);
     save_file_state(pack_dir, &next_states).context("failed to persist file state")?;
 
+    let graph_enabled = crate::config::resolve_graph_enabled(manifest.graph.enabled);
+    let unique_source_paths: Vec<String> = {
+        let mut v: Vec<String> = next_docs.iter().map(|d| d.source_path.clone()).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+
+    if !graph_enabled {
+        if let Err(e) = helix_write_graph_stats(
+            pack_dir,
+            0,
+            0,
+            total_chunks,
+            &unique_source_paths,
+            &index_warnings,
+        ) {
+            crate::term::warn(format!("warning: failed writing graph stats: {}", e));
+        }
+        manifest.updated_at = Utc::now();
+        save_manifest(pack_dir, manifest).context("failed to update manifest timestamp")?;
+        return Ok((scanned, updated_files, total_chunks, index_warnings));
+    }
+
     let mut ontology = OntologyEngine::new(pack_dir)?;
     let mut all_entities = HashSet::new();
     let mut all_relations = Vec::new();
@@ -328,12 +353,6 @@ pub fn run_index(
             e
         ));
     }
-    let unique_source_paths: Vec<String> = {
-        let mut v: Vec<String> = next_docs.iter().map(|d| d.source_path.clone()).collect();
-        v.sort_unstable();
-        v.dedup();
-        v
-    };
     let relationship_count_unique = all_relations
         .iter()
         .map(|r| (r.source.clone(), r.relation.clone(), r.target.clone()))

@@ -258,6 +258,17 @@ pub fn resolve_openai_synthesis_model() -> String {
     DEFAULT_OPENAI_SYNTHESIS_MODEL.to_string()
 }
 
+pub fn resolve_graph_enabled(default_enabled: bool) -> bool {
+    match std::env::var("MEMKIT_GRAPH_ENABLED") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => default_enabled,
+        },
+        Err(_) => default_enabled,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

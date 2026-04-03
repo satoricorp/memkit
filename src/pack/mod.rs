@@ -6,7 +6,10 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::pack_location::PackLocation;
-use crate::types::{ChunkingConfig, EmbeddingConfig, FileState, Manifest, SourceConfig};
+use crate::types::{
+    ChunkingConfig, ConversationConfig, EmbeddingConfig, FileState, GraphConfig, Manifest,
+    SourceConfig,
+};
 
 pub fn manifest_path(pack_dir: &Path) -> PathBuf {
     pack_dir.join("manifest.json")
@@ -66,6 +69,8 @@ pub fn init_pack(
             target_chars: 1200,
             overlap_chars: 200,
         },
+        conversation: ConversationConfig::default(),
+        graph: GraphConfig::default(),
         sources: Vec::<SourceConfig>::new(),
     };
     let manifest_json = serde_json::to_string_pretty(&manifest)?;

@@ -14,10 +14,13 @@ Used when `OPENAI_API_KEY` is set and the server synthesizes answers.
 
 `mk use model <id>` writes the namespaced id to `memkit.json` (e.g. `openai:gpt-5.4`). Run `mk list` to see current and supported model IDs. That file participates in step (2) above for synthesis.
 
-## Embeddings and optional local inference
+## Embeddings, conversation extraction, and optional graph inference
 
-- **`MEMKIT_LLM_MODEL`** — GGUF path for **local** embed / optional llama features when the `llama-embedded` feature is enabled; not used for OpenAI synthesis.
-- **`MEMKIT_LLM_PROVIDER`** — ontology / extraction backend (`rules` by default; `llama` only with the `llama-embedded` feature).
+- **`MEMKIT_CONVERSATION_PROVIDER`** — conversation memory extraction backend. Use `openai` for hosted extraction or `llama` for local extraction.
+- **`MEMKIT_CONVERSATION_MODEL`** — optional override for the conversation extraction model.
+- **`MEMKIT_LLM_MODEL`** — GGUF path for **local** llama features when the `llama-embedded` feature is enabled.
+- **`MEMKIT_LLM_PROVIDER`** — ontology provider for optional graph extraction (`rules` or `llama`).
+- **`MEMKIT_GRAPH_ENABLED`** — graph/entity extraction toggle. Default is off.
 
 ## Deprecated aliases
 

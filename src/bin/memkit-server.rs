@@ -22,7 +22,20 @@ async fn main() -> Result<()> {
         .unwrap_or(8080);
     let packs = std::env::var("MEMKIT_PACKS")
         .ok()
+        .filter(|value| !value.trim().is_empty())
         .map(|value| parse_pack_paths(&value))
+        .or_else(|| {
+            std::env::var("MEMKIT_PACK_PATH")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| vec![PathBuf::from(value)])
+        })
+        .or_else(|| {
+            std::env::var("MEMKIT_PACK_PATHS")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| parse_pack_paths(&value))
+        })
         .unwrap_or_default();
 
     memkit::server::run_server(packs, host, port)
