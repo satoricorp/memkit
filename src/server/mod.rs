@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Query, State};
+use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Html;
 use axum::routing::{get, post};
@@ -14,12 +15,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::add_docs::run_add;
+use crate::add_docs::{run_add, run_add_conversations};
 use crate::cloud::{
     CloudCurrentPointer, CloudPackMetadata, CloudPackSummary, CloudPackUri, CloudTenantKind,
     cloud_root, ensure_cloud_pack_dirs, parse_cloud_pack_uri, read_current_pointer,
     read_pack_metadata, summarize_cloud_pack, write_json_atomically,
 };
+use crate::conversation::{ConversationSessionInput, ConversationTurn};
 use crate::file_tree::format_file_tree;
 use crate::google::{
     self, GoogleAuthenticator, fetch_doc_content, fetch_sheet_content, get_access_token,
@@ -37,7 +39,6 @@ use crate::pack::{
 use crate::pack_location::PackLocation;
 use crate::publish::{sha256_for_path, unpack_cloud_publish_archive};
 use crate::query::{run_query, run_query_multi};
-use crate::query_synth::{QueryProvider, synthesize_answer_async};
 use crate::registry::{
     ensure_registered, load_registry, pack_dir_for_path, remove_pack_by_path,
     resolve_pack_by_name_or_path,
@@ -45,7 +46,9 @@ use crate::registry::{
 use crate::types::SourceDoc;
 
 mod jobs;
+mod query_route;
 use jobs::{JobRecord, JobRegistry, JobState, JobType};
+use query_route::query;
 
 fn load_pack_docs(pack: &Path, dim: usize) -> anyhow::Result<Vec<SourceDoc>> {
     helix_load_all_docs(&helix_pack_path_for_local(pack), dim)
@@ -65,22 +68,6 @@ struct AppState {
     jobs: Arc<Mutex<JobRegistry>>,
     google: Option<Arc<GoogleAuthState>>,
     google_load_error: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct QueryRequest {
-    query: String,
-    #[serde(default = "default_top_k")]
-    top_k: usize,
-    #[serde(default = "default_use_reranker")]
-    use_reranker: bool,
-    #[serde(default)]
-    raw: bool,
-    pack: Option<String>,
-    #[serde(default)]
-    pack_uri: Option<String>,
-    #[serde(default)]
-    path_filter: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -106,6 +93,15 @@ struct AddConversationMessage {
     content: String,
 }
 
+#[derive(Deserialize)]
+struct AddConversationSession {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    session_time: Option<String>,
+    conversation: Vec<AddConversationMessage>,
+}
+
 #[derive(Deserialize, Default)]
 struct AddRequest {
     /// Pack path when adding documents/conversation. When adding a directory (no documents/conversation), this is the content path (directory or file to add).
@@ -115,7 +111,13 @@ struct AddRequest {
     #[serde(default)]
     pack: Option<String>,
     documents: Option<Vec<AddDocumentItem>>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    session_time: Option<String>,
     conversation: Option<Vec<AddConversationMessage>>,
+    #[serde(default)]
+    conversations: Option<Vec<AddConversationSession>>,
 }
 
 fn default_top_k() -> usize {
@@ -224,11 +226,57 @@ fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn cloud_auth_context(headers: &HeaderMap) -> CloudAuthContext {
-    CloudAuthContext {
-        user_id: header_string(headers, "x-memkit-user-id"),
-        org_id: header_string(headers, "x-memkit-org-id"),
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(AUTHORIZATION)?.to_str().ok()?.trim();
+    let (scheme, token) = raw.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
     }
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    Some(token.to_string())
+}
+
+async fn authenticated_cloud_context(
+    headers: &HeaderMap,
+) -> Result<CloudAuthContext, (StatusCode, Json<Value>)> {
+    let session_token = bearer_token(headers).ok_or((
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"error":{"code":"AUTH_REQUIRED","message":"Bearer session token required"}})),
+    ))?;
+
+    let profile = crate::auth::authenticate_cloud_session(&session_token)
+        .await
+        .map_err(|err| match err {
+            crate::auth::CloudSessionAuthError::Unauthorized(message) => (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error":{"code":"INVALID_SESSION","message":message}})),
+            ),
+            crate::auth::CloudSessionAuthError::Misconfigured(message) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error":{"code":"AUTH_BACKEND_NOT_CONFIGURED","message":message}})),
+            ),
+            crate::auth::CloudSessionAuthError::Backend(message) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error":{"code":"AUTH_BACKEND_FAILED","message":message}})),
+            ),
+        })?;
+
+    let auth = CloudAuthContext {
+        user_id: profile.user_id.map(|v| v.to_string()),
+        org_id: profile.org_id.map(|v| v.to_string()),
+    };
+    if auth.user_id.is_none() && auth.org_id.is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                json!({"error":{"code":"AUTH_PROFILE_INCOMPLETE","message":"authenticated session is missing user/org identity"}}),
+            ),
+        ));
+    }
+    Ok(auth)
 }
 
 fn authorize_cloud_uri(
@@ -241,7 +289,9 @@ fn authorize_cloud_uri(
                 if user_id != &pack_uri.tenant_id {
                     return Err((
                         StatusCode::FORBIDDEN,
-                        Json(json!({"error":{"code":"PACK_FORBIDDEN","message":"cloud pack does not belong to the current user"}})),
+                        Json(
+                            json!({"error":{"code":"PACK_FORBIDDEN","message":"cloud pack does not belong to the current user"}}),
+                        ),
                     ));
                 }
             }
@@ -251,7 +301,9 @@ fn authorize_cloud_uri(
                 if org_id != &pack_uri.tenant_id {
                     return Err((
                         StatusCode::FORBIDDEN,
-                        Json(json!({"error":{"code":"PACK_FORBIDDEN","message":"cloud pack does not belong to the current org"}})),
+                        Json(
+                            json!({"error":{"code":"PACK_FORBIDDEN","message":"cloud pack does not belong to the current org"}}),
+                        ),
                     ));
                 }
             }
@@ -265,7 +317,10 @@ fn discover_cloud_packs_for_tenant(
     tenant_kind: CloudTenantKind,
     tenant_id: &str,
 ) -> Result<Vec<CloudPackSummary>, (StatusCode, Json<Value>)> {
-    let tenant_root = cloud_root.join("packs").join(tenant_kind.as_str()).join(tenant_id);
+    let tenant_root = cloud_root
+        .join("packs")
+        .join(tenant_kind.as_str())
+        .join(tenant_id);
     if !tenant_root.exists() {
         return Ok(Vec::new());
     }
@@ -310,13 +365,7 @@ async fn list_cloud_packs(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let auth = cloud_auth_context(&headers);
-    if auth.user_id.is_none() && auth.org_id.is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":{"code":"AUTH_CONTEXT_REQUIRED","message":"x-memkit-user-id or x-memkit-org-id header required"}})),
-        ));
-    }
+    let auth = authenticated_cloud_context(&headers).await?;
     let mut packs = Vec::new();
     if let Some(ref user_id) = auth.user_id {
         packs.extend(discover_cloud_packs_for_tenant(
@@ -359,7 +408,7 @@ fn unique_temp_upload_path(prefix: &str) -> PathBuf {
 
 fn resolve_cloud_query_location(
     state: &AppState,
-    headers: &HeaderMap,
+    auth: &CloudAuthContext,
     raw_pack_uri: &str,
 ) -> Result<PackLocation, (StatusCode, Json<Value>)> {
     let pack_uri = parse_cloud_pack_uri(raw_pack_uri).map_err(|e| {
@@ -368,7 +417,7 @@ fn resolve_cloud_query_location(
             Json(json!({"error":{"code":"INVALID_PACK_URI","message":e.to_string()}})),
         )
     })?;
-    authorize_cloud_uri(&cloud_auth_context(headers), &pack_uri)?;
+    authorize_cloud_uri(auth, &pack_uri)?;
     let current = read_current_pointer(&pack_uri, &state.cloud_root).map_err(|e| {
         (
             StatusCode::NOT_FOUND,
@@ -379,7 +428,9 @@ fn resolve_cloud_query_location(
     if !revision_root.exists() {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json!({"error":{"code":"REVISION_NOT_FOUND","message":format!("missing revision {}", current.revision)}})),
+            Json(
+                json!({"error":{"code":"REVISION_NOT_FOUND","message":format!("missing revision {}", current.revision)}}),
+            ),
         ));
     }
     Ok(PackLocation::cloud(revision_root))
@@ -413,10 +464,8 @@ async fn status(State(state): State<AppState>, Query(q): Query<StatusQuery>) -> 
         source_root_paths,
         index_warnings,
     ) = if let Some(ref path) = q.path {
-        // Resolve as pack name (registry) first, then as filesystem path.
-        match resolve_pack_by_name_or_path(path) {
+        match resolve_strict_local_pack_root(path) {
             Ok(pack_root) => {
-                // If path was already the pack dir (manifest.json here), use it; else pack_root is parent of .memkit.
                 let pack_dir = resolve_pack_dir(&pack_root);
                 let manifest = load_manifest(&pack_dir).ok();
                 let sources = manifest
@@ -471,53 +520,11 @@ async fn status(State(state): State<AppState>, Query(q): Query<StatusQuery>) -> 
                     index_warnings,
                 )
             }
-            Err(_) => {
-                let dir = PathBuf::from(path)
-                    .canonicalize()
-                    .unwrap_or_else(|_| PathBuf::from(path));
-                let pack = resolve_pack_dir(&dir);
-                let manifest = load_manifest(&pack).ok();
-                let sources = manifest
-                    .as_ref()
-                    .map(|m| m.sources.clone())
-                    .unwrap_or_default();
-                let source_root_paths: Vec<String> = manifest
-                    .as_ref()
-                    .map(|m| {
-                        resolve_source_roots(&pack, m)
-                            .into_iter()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let (vector_count, file_paths, indexed, index_warnings) =
-                    if let Some((vc, mut fp, w)) = helix_try_cached_index_status(&pack) {
-                        fp.sort_unstable();
-                        fp.dedup();
-                        (vc, fp, vc > 0, w)
-                    } else {
-                        let docs = manifest
-                            .as_ref()
-                            .and_then(|m| load_pack_docs(&pack, m.embedding.dimension).ok())
-                            .unwrap_or_default();
-                        let mut fp: Vec<String> =
-                            docs.iter().map(|d| d.source_path.clone()).collect();
-                        fp.sort_unstable();
-                        fp.dedup();
-                        let n = docs.len();
-                        let iw = helix_read_index_warnings(&pack);
-                        (n, fp, n > 0, iw)
-                    };
-                (
-                    pack.display().to_string(),
-                    sources,
-                    vector_count,
-                    indexed,
-                    file_paths,
-                    Some(pack),
-                    source_root_paths,
-                    index_warnings,
-                )
+            Err(e) => {
+                return Json(json!({
+                    "status":"error",
+                    "error":{"code":"INVALID_PACK","message":e.to_string()}
+                }));
             }
         }
     } else {
@@ -815,141 +822,6 @@ async fn graph_view() -> Html<&'static str> {
     )
 }
 
-/// Query flow: (1) Retrieval: run_query() loads pack docs, embeds the query, and runs vector search
-/// (Helix: helix_hybrid_query). Returns QueryResponse with results (top chunks).
-/// (2) Synthesis: unless req.raw, synthesize_answer_async calls OpenAI chat/completions. Use ?raw=true or --raw to skip synthesis.
-async fn query(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<QueryRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if req.pack.is_some() && req.pack_uri.is_some() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":{"code":"INVALID_QUERY","message":"use either pack or pack_uri, not both"}})),
-        ));
-    }
-
-    let requested_cloud_uri = req
-        .pack_uri
-        .as_deref()
-        .or_else(|| req.pack.as_deref().filter(|p| p.starts_with("memkit://")));
-    let resp_result = if let Some(pack_uri) = requested_cloud_uri {
-        let loc = resolve_cloud_query_location(&state, &headers, pack_uri)?;
-        run_query(
-            &loc,
-            &req.query,
-            req.top_k,
-            req.use_reranker,
-            req.path_filter.as_deref(),
-        )
-    } else if let Some(ref path) = req.pack {
-        if path.starts_with("s3://") {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(
-                    json!({"error":{"code":"INVALID_PACK","message":"S3 pack paths are not supported in this build"}}),
-                ),
-            ));
-        }
-        let dir = PathBuf::from(path);
-        let pack = if has_manifest_at(&dir) {
-            resolve_pack_dir(&dir)
-        } else {
-            state.packs.first().cloned().unwrap_or(dir)
-        };
-        let loc = PackLocation::local(pack);
-        run_query(
-            &loc,
-            &req.query,
-            req.top_k,
-            req.use_reranker,
-            req.path_filter.as_deref(),
-        )
-    } else if state.packs.len() > 1 {
-        let pack_dirs: Vec<PathBuf> = state
-            .packs
-            .iter()
-            .map(|r| pack_dir_for_path(r.as_path()))
-            .collect();
-        run_query_multi(
-            &pack_dirs,
-            &req.query,
-            req.top_k,
-            req.use_reranker,
-            req.path_filter.as_deref(),
-        )
-    } else {
-        let Some(pack_root) = state.packs.first() else {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error":{"code":"NO_PACK","message":"no pack configured"}})),
-            ));
-        };
-        let pack_dir = pack_dir_for_path(pack_root);
-        run_query(
-            &PackLocation::local(&pack_dir),
-            &req.query,
-            req.top_k,
-            req.use_reranker,
-            req.path_filter.as_deref(),
-        )
-    };
-
-    match resp_result {
-        Ok(resp) => {
-            let mut by_path: std::collections::HashMap<String, f32> =
-                std::collections::HashMap::new();
-            for h in &resp.results {
-                by_path
-                    .entry(h.file_path.clone())
-                    .and_modify(|s| *s = (*s).max(h.score))
-                    .or_insert(h.score);
-            }
-            let mut sources: Vec<_> = by_path
-                .into_iter()
-                .map(|(path, score)| json!({ "path": path, "score": score }))
-                .collect();
-            sources.sort_by(|a, b| {
-                let sa = a.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let sb = b.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
-            });
-
-            if req.raw {
-                Ok(Json(json!(resp)))
-            } else {
-                match synthesize_answer_async(&req.query, &resp).await {
-                    Ok((answer, provider)) => {
-                        let model = match &provider {
-                            QueryProvider::OpenAI(m) => m.clone(),
-                            QueryProvider::None => String::new(),
-                        };
-                        Ok(Json(json!({
-                            "answer": answer,
-                            "sources": sources,
-                            "provider": provider.label(),
-                            "model": model,
-                            "retrieval_results": resp.retrieval_results
-                        })))
-                    }
-                    Err(e) => Ok(Json(json!({
-                        "answer": serde_json::Value::Null,
-                        "synthesis_error": e.to_string(),
-                        "sources": sources,
-                        "results": resp.results,
-                        "retrieval_results": resp.retrieval_results
-                    }))),
-                }
-            }
-        }
-        Err(e) => Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":{"code":"QUERY_FAILED","message":e.to_string()}})),
-        )),
-    }
-}
-
 async fn publish(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -965,7 +837,8 @@ async fn publish(
             Json(json!({"error":{"code":"INVALID_PACK_URI","message":e.to_string()}})),
         )
     })?;
-    authorize_cloud_uri(&cloud_auth_context(&headers), &pack_uri)?;
+    let auth = authenticated_cloud_context(&headers).await?;
+    authorize_cloud_uri(&auth, &pack_uri)?;
 
     let overwrite = header_string(&headers, "x-memkit-overwrite")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
@@ -1000,29 +873,30 @@ async fn publish(
     drop(bytes);
 
     let upload_path_for_hash = upload_path.clone();
-    let (computed_sha, size_bytes) = tokio::task::spawn_blocking(move || {
-        sha256_for_path(&upload_path_for_hash)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":{"code":"UPLOAD_HASH_FAILED","message":e.to_string()}})),
-        )
-    })?
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":{"code":"UPLOAD_HASH_FAILED","message":e.to_string()}})),
-        )
-    })?;
+    let (computed_sha, size_bytes) =
+        tokio::task::spawn_blocking(move || sha256_for_path(&upload_path_for_hash))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error":{"code":"UPLOAD_HASH_FAILED","message":e.to_string()}})),
+                )
+            })?
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error":{"code":"UPLOAD_HASH_FAILED","message":e.to_string()}})),
+                )
+            })?;
 
     if let Some(ref expected_sha) = expected_sha {
         if expected_sha != &computed_sha {
             let _ = tokio::fs::remove_file(&upload_path).await;
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error":{"code":"CHECKSUM_MISMATCH","message":"uploaded artifact checksum mismatch"}})),
+                Json(
+                    json!({"error":{"code":"CHECKSUM_MISMATCH","message":"uploaded artifact checksum mismatch"}}),
+                ),
             ));
         }
     }
@@ -1107,17 +981,18 @@ async fn publish(
     }
 
     let now = Utc::now();
-    let mut metadata = read_pack_metadata(&pack_uri, &state.cloud_root).unwrap_or(CloudPackMetadata {
-        pack_uri: pack_uri.to_string(),
-        pack_id: pack_uri.pack_id.clone(),
-        tenant_type: pack_uri.tenant_kind,
-        tenant_id: pack_uri.tenant_id.clone(),
-        display_name: None,
-        source_pack_id: None,
-        current_revision: None,
-        created_at: now,
-        updated_at: now,
-    });
+    let mut metadata =
+        read_pack_metadata(&pack_uri, &state.cloud_root).unwrap_or(CloudPackMetadata {
+            pack_uri: pack_uri.to_string(),
+            pack_id: pack_uri.pack_id.clone(),
+            tenant_type: pack_uri.tenant_kind,
+            tenant_id: pack_uri.tenant_id.clone(),
+            display_name: None,
+            source_pack_id: None,
+            current_revision: None,
+            created_at: now,
+            updated_at: now,
+        });
     metadata.current_revision = Some(revision_id.clone());
     metadata.display_name = display_name
         .clone()
@@ -1164,10 +1039,10 @@ fn resolve_pack_root_for_add(
     pack_override: Option<&str>,
 ) -> Result<PathBuf, (StatusCode, Json<Value>)> {
     let root = if let Some(p) = pack_override {
-        PathBuf::from(p).canonicalize().map_err(|e| {
+        resolve_strict_local_pack_root(p).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error":{"code":"PATH_INVALID","message":format!("pack path not accessible: {}", e)}})),
+                Json(json!({"error":{"code":"PATH_INVALID","message":e.to_string()}})),
             )
         })?
     } else {
@@ -1186,30 +1061,42 @@ fn resolve_pack_dir_for_docs(
     pack_override: Option<&str>,
 ) -> Result<PathBuf, (StatusCode, Json<Value>)> {
     if let Some(p) = pack_override {
-        let root = PathBuf::from(p)
-            .canonicalize()
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error":{"code":"PATH_INVALID","message":format!("pack path not accessible: {}", e)}})),
-                )
-            })?;
-        return Ok(resolve_pack_dir(&root));
-    }
-    if let Some(path) = path {
-        let dir = PathBuf::from(path).canonicalize().map_err(|e| {
+        return resolve_strict_local_pack_dir(p).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error":{"code":"PATH_INVALID","message":format!("path not accessible: {}", e)}})),
+                Json(json!({"error":{"code":"PATH_INVALID","message":e.to_string()}})),
             )
-        })?;
-        let resolved = resolve_pack_dir(&dir);
-        return Ok(resolved);
+        });
+    }
+    if let Some(path) = path {
+        return resolve_strict_local_pack_dir(path).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":{"code":"PATH_INVALID","message":e.to_string()}})),
+            )
+        });
     }
     state.packs.first().map(|r| pack_dir_for_path(r)).ok_or((
         StatusCode::BAD_REQUEST,
         Json(json!({"error":{"code":"NO_PACK","message":"no pack configured"}})),
     ))
+}
+
+fn resolve_strict_local_pack_root(selector: &str) -> anyhow::Result<PathBuf> {
+    let pack_root = resolve_pack_by_name_or_path(selector)?;
+    if !has_manifest_at(&pack_root) {
+        anyhow::bail!("no memory pack at {}", pack_root.display());
+    }
+    Ok(pack_root)
+}
+
+fn resolve_strict_local_pack_dir(selector: &str) -> anyhow::Result<PathBuf> {
+    let pack_root = resolve_strict_local_pack_root(selector)?;
+    let pack_dir = resolve_pack_dir(&pack_root);
+    if !pack_dir.join("manifest.json").exists() {
+        anyhow::bail!("no memory pack at {}", pack_root.display());
+    }
+    Ok(pack_dir)
 }
 
 /// Create pack at pack_dir if manifest.json does not exist.
@@ -1451,7 +1338,8 @@ async fn add_now(
     Json(req): Json<AddRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let has_content = req.documents.as_ref().map_or(false, |d| !d.is_empty())
-        || req.conversation.as_ref().map_or(false, |c| !c.is_empty());
+        || req.conversation.as_ref().map_or(false, |c| !c.is_empty())
+        || req.conversations.as_ref().map_or(false, |c| !c.is_empty());
 
     if !has_content {
         // Add directory (or file) mode: path = content to add, pack = optional pack override.
@@ -1650,17 +1538,38 @@ async fn add_now(
         }
     }
 
+    let mut conversation_sessions = Vec::new();
     if let Some(conv) = &req.conversation {
-        let text: String = conv
-            .iter()
-            .map(|m| format!("{}: {}", m.role, m.content))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let source_path = format!("memkit://add/{}", Utc::now().timestamp_millis());
-        items.push((text, source_path));
+        conversation_sessions.push(ConversationSessionInput {
+            session_id: req.session_id.clone(),
+            session_time: req.session_time.clone(),
+            conversation: conv
+                .iter()
+                .map(|m| ConversationTurn {
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                })
+                .collect(),
+        });
+    }
+    if let Some(conv_batches) = &req.conversations {
+        for session in conv_batches {
+            conversation_sessions.push(ConversationSessionInput {
+                session_id: session.session_id.clone(),
+                session_time: session.session_time.clone(),
+                conversation: session
+                    .conversation
+                    .iter()
+                    .map(|m| ConversationTurn {
+                        role: m.role.clone(),
+                        content: m.content.clone(),
+                    })
+                    .collect(),
+            });
+        }
     }
 
-    if items.is_empty() {
+    if items.is_empty() && conversation_sessions.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(
@@ -1669,6 +1578,20 @@ async fn add_now(
         ));
     }
 
+    let add_document_count = items.len();
+    let add_conversation_count = conversation_sessions.len();
+    let add_session_ids = conversation_sessions
+        .iter()
+        .take(8)
+        .map(|session| {
+            session
+                .session_id
+                .as_deref()
+                .unwrap_or("<missing-session-id>")
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let pack_path = pack_dir.clone();
     let items_clone: Vec<(String, String)> =
         items.iter().map(|(c, s)| (c.clone(), s.clone())).collect();
@@ -1676,6 +1599,10 @@ async fn add_now(
         let mut total_chunks = 0usize;
         for (content, source_path) in &items_clone {
             let n = run_add(&pack_path, content, source_path)?;
+            total_chunks += n;
+        }
+        if !conversation_sessions.is_empty() {
+            let n = run_add_conversations(&pack_path, &conversation_sessions)?;
             total_chunks += n;
         }
         Ok(json!({
@@ -1692,6 +1619,19 @@ async fn add_now(
         }))),
         Ok(Err(e)) => {
             let msg = e.to_string();
+            crate::term::warn(format!(
+                "warning: /add failed for pack {} (documents={}, conversation_sessions={}): {}",
+                pack_dir.display(),
+                add_document_count,
+                add_conversation_count,
+                msg
+            ));
+            if add_conversation_count > 0 {
+                crate::term::warn(format!(
+                    "warning: /add failed session ids (showing up to 8): {}",
+                    add_session_ids
+                ));
+            }
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
@@ -1701,6 +1641,13 @@ async fn add_now(
         }
         Err(e) => {
             let msg = e.to_string();
+            crate::term::warn(format!(
+                "warning: /add task failed for pack {} (documents={}, conversation_sessions={}): {}",
+                pack_dir.display(),
+                add_document_count,
+                add_conversation_count,
+                msg
+            ));
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
