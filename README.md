@@ -4,13 +4,7 @@ Local memory pack CLI + server (Rust).
 
 ## Install
 
-Once a semver tag such as `v0.1.0` has been released, users can install `mk` with either:
-
-```bash
-brew install satoricorp/tap/memkit
-```
-
-or:
+Once a semver tag such as `v0.1.0` has been released, users can install `mk` with:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/satoricorp/memkit/releases/download/v0.1.0/memkit-installer.sh | sh
@@ -31,11 +25,10 @@ The CLI binary is `mk` (at `target/release/mk`).
 Tagging a semver release such as `v0.1.0` triggers [`release.yml`](/Users/joe/git/memkit/.github/workflows/release.yml), which:
 
 - builds release archives for macOS arm64, macOS x86_64, and Linux x86_64
-- generates a `curl | sh` installer script and Homebrew formula
+- generates a `curl | sh` installer script
 - publishes GitHub Release artifacts and checksums
-- updates the `satoricorp/homebrew-tap` formula
 
-The workflow expects a `HOMEBREW_TAP_TOKEN` GitHub Actions secret with push access to `satoricorp/homebrew-tap`.
+The curl-only release flow does not require a Homebrew tap repo or `HOMEBREW_TAP_TOKEN`.
 
 ## Convex Backend
 
