@@ -3,8 +3,8 @@ use anyhow::{Context, Result};
 use crate::config::resolve_openai_synthesis_model;
 use crate::types::QueryResponse;
 
-const MAX_CONTEXT_CHARS: usize = 8000;
-const MAX_CHUNKS: usize = 8;
+const MAX_CONTEXT_CHARS: usize = 10000;
+const MAX_ITEMS: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryProvider {
@@ -14,12 +14,6 @@ pub enum QueryProvider {
 }
 
 impl QueryProvider {
-    pub fn label(&self) -> String {
-        match self {
-            QueryProvider::None => "none".to_string(),
-            QueryProvider::OpenAI(model) => format!("OpenAI: {}", model),
-        }
-    }
 }
 
 fn synthesis_max_tokens() -> usize {
@@ -74,15 +68,64 @@ pub async fn synthesize_answer_async(
 
 fn build_prompt_inner(query: &str, response: &QueryResponse) -> String {
     let mut context = String::with_capacity(MAX_CONTEXT_CHARS + 512);
-    for hit in response.results.iter().take(MAX_CHUNKS) {
-        let block = format!("{}\n(source: {})\n---\n", hit.content.trim(), hit.file_path);
+    if !response.notes.is_empty() {
+        for note in response.notes.iter().take(MAX_ITEMS) {
+            let block = format!("{}\n---\n", note.note.trim());
+            if context.len() + block.len() > MAX_CONTEXT_CHARS {
+                break;
+            }
+            context.push_str(&block);
+        }
+    } else {
+        for hit in response.results.iter().take(MAX_ITEMS) {
+            let block = format!("{}\n(source: {})\n---\n", hit.content.trim(), hit.file_path);
+            if context.len() + block.len() > MAX_CONTEXT_CHARS {
+                break;
+            }
+            context.push_str(&block);
+        }
+    }
+    if !response.hydrated_evidence.is_empty() {
+        context.push_str("Hydrated evidence:\n");
+        for evidence in response.hydrated_evidence.iter().take(3) {
+            let block = format!("{}\n---\n", evidence.evidence.trim());
+            if context.len() + block.len() > MAX_CONTEXT_CHARS {
+                break;
+            }
+            context.push_str(&block);
+        }
+    }
+    if let Some(query_time) = &response.query_time {
+        let block = format!(
+            "Query time analysis: focus={}, wants_session_time={}, wants_context_time={}, context_time_text={}, expected_relation_kind={}, expected_value_kind={}\n---\n",
+            query_time.focus,
+            query_time.wants_session_time,
+            query_time.wants_context_time,
+            query_time.context_time_text.as_deref().unwrap_or("none"),
+            query_time
+                .expected_relation_kind
+                .as_deref()
+                .unwrap_or("none"),
+            query_time.expected_value_kind.as_deref().unwrap_or("none")
+        );
         if context.len() + block.len() > MAX_CONTEXT_CHARS {
-            break;
+            return format!(
+                "Using only the memory notes and evidence below, answer the question in 1-2 sentences. \
+Prefer direct supported answers. If the question is asking when the event happened, use context time. \
+If it is asking when the conversation happened, use session time. Prefer notes whose relation_kind and value_kind match the requested slot. \
+For where questions, prioritize location/source notes. For color questions, prioritize color notes. For prior identity questions, prioritize previous-name notes. \
+Only say you cannot determine the answer if the notes truly do not support it.\n\nQuestion: {query}\n\nContext:\n---\n{context}\n\nReply:"
+            );
         }
         context.push_str(&block);
     }
     format!(
-        "Using only the context below, answer the question in 1-2 sentences. If the context contains relevant numbers, amounts, or facts, state them. Only say you cannot determine the answer if the context truly does not contain the information.\n\nQuestion: {query}\n\nContext:\n---\n{context}\n\nReply:"
+        "Using only the memory notes and evidence below, answer the question in 1-2 sentences. \
+Prefer direct supported answers. If the question is asking when the event happened, use context time. \
+If it is asking when the conversation happened, use session time. State the supported fact directly when possible. \
+Prefer notes whose relation_kind and value_kind match the requested slot. For where questions, prioritize location/source notes. \
+For color questions, prioritize color notes. For prior identity questions, prioritize previous-name notes. \
+Only say you cannot determine the answer if the notes truly do not support it.\n\nQuestion: {query}\n\nContext:\n---\n{context}\n\nReply:"
     )
 }
 
