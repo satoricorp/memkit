@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -15,7 +15,7 @@ use crate::google::{
 };
 
 use super::{
-    AppState, add_source_root, ensure_pack_exists, enqueue_index_job, pack_dir_for_path,
+    AppState, add_source_root, enqueue_index_job, ensure_pack_exists, pack_dir_for_path,
     resolve_pack_dir_for_docs, resolve_pack_root_for_add, start_next_job_if_idle,
 };
 
@@ -61,9 +61,9 @@ pub(super) async fn add_now(
     State(state): State<AppState>,
     Json(req): Json<AddRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let has_content = req.documents.as_ref().map_or(false, |d| !d.is_empty())
-        || req.conversation.as_ref().map_or(false, |c| !c.is_empty())
-        || req.conversations.as_ref().map_or(false, |c| !c.is_empty());
+    let has_content = req.documents.as_ref().is_some_and(|d| !d.is_empty())
+        || req.conversation.as_ref().is_some_and(|c| !c.is_empty())
+        || req.conversations.as_ref().is_some_and(|c| !c.is_empty());
 
     if !has_content {
         let content_path = req.path.as_deref().ok_or((
@@ -154,7 +154,9 @@ pub(super) async fn add_now(
                         .map_err(|e| {
                             (
                                 StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(json!({"error":{"code":"HTTP_CLIENT","message":e.to_string()}})),
+                                Json(
+                                    json!({"error":{"code":"HTTP_CLIENT","message":e.to_string()}}),
+                                ),
                             )
                         })?;
                     let resp = client.get(&item.value).send().await.map_err(|e| {
@@ -247,7 +249,9 @@ pub(super) async fn add_now(
                 _ => {
                     return Err((
                         StatusCode::BAD_REQUEST,
-                        Json(json!({"error":{"code":"INVALID_TYPE","message":"document type must be url, content, google_doc, or google_sheet"}})),
+                        Json(
+                            json!({"error":{"code":"INVALID_TYPE","message":"document type must be url, content, google_doc, or google_sheet"}}),
+                        ),
                     ));
                 }
             }
@@ -288,7 +292,9 @@ pub(super) async fn add_now(
     if items.is_empty() && conversation_sessions.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({"error":{"code":"EMPTY_ADD","message":"documents or conversation required"}})),
+            Json(
+                json!({"error":{"code":"EMPTY_ADD","message":"documents or conversation required"}}),
+            ),
         ));
     }
 

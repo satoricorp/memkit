@@ -22,8 +22,6 @@ pub fn has_manifest_at(path: &Path) -> bool {
 pub fn resolve_pack_dir(path: &Path) -> PathBuf {
     if path.join("manifest.json").exists() {
         path.to_path_buf()
-    } else if path.join(".memkit/manifest.json").exists() {
-        path.join(".memkit")
     } else {
         path.join(".memkit")
     }
@@ -40,13 +38,11 @@ pub fn init_pack(
     model: &str,
     dim: usize,
 ) -> Result<()> {
-    if pack_dir.exists() && !force {
-        if manifest_path(pack_dir).exists() {
-            bail!(
-                "pack already exists at {} (use --force to overwrite scaffold)",
-                pack_dir.display()
-            );
-        }
+    if pack_dir.exists() && !force && manifest_path(pack_dir).exists() {
+        bail!(
+            "pack already exists at {} (use --force to overwrite scaffold)",
+            pack_dir.display()
+        );
     }
 
     fs::create_dir_all(pack_dir).context("failed to create pack directory")?;
@@ -116,7 +112,7 @@ pub fn load_file_state_from_loc(loc: &PackLocation) -> Result<Vec<FileState>> {
         Ok(b) => b,
         Err(_) => return Ok(Vec::new()),
     };
-    Ok(serde_json::from_slice::<Vec<FileState>>(&bytes).context("invalid file state json")?)
+    serde_json::from_slice::<Vec<FileState>>(&bytes).context("invalid file state json")
 }
 
 pub fn save_file_state(pack_dir: &Path, states: &[FileState]) -> Result<()> {

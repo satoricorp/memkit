@@ -56,16 +56,10 @@ impl Default for ConversationConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GraphConfig {
     #[serde(default)]
     pub enabled: bool,
-}
-
-impl Default for GraphConfig {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

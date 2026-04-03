@@ -26,12 +26,12 @@ pub fn display_version() -> String {
 
 /// Returns true if we should use colors on stdout (TTY and NO_COLOR not set).
 pub fn color_stdout() -> bool {
-    !env::var("NO_COLOR").is_ok() && std::io::stdout().is_terminal()
+    env::var("NO_COLOR").is_err() && std::io::stdout().is_terminal()
 }
 
 /// Returns true if we should use colors on stderr (TTY and NO_COLOR not set).
 pub fn color_stderr() -> bool {
-    !env::var("NO_COLOR").is_ok() && std::io::stderr().is_terminal()
+    env::var("NO_COLOR").is_err() && std::io::stderr().is_terminal()
 }
 
 /// Prints a warning to stderr, in yellow when stderr is a TTY.
@@ -82,43 +82,14 @@ pub fn print_help_title(color: bool) {
             println!("{}", line);
         }
     }
-    let copyright = format!("© Satori Engineering Inc. 2026 Version {}", display_version());
+    let copyright = format!(
+        "© Satori Engineering Inc. 2026 Version {}",
+        display_version()
+    );
     if color {
         println!("{}", copyright.cyan());
     } else {
         println!("{}", copyright);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{GIT_SHA, RELEASE_VERSION};
-
-    #[test]
-    fn release_version_is_semver_like() {
-        assert!(
-            RELEASE_VERSION
-                .split('.')
-                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())),
-            "unexpected release version: {}",
-            RELEASE_VERSION
-        );
-    }
-
-    #[test]
-    fn git_sha_is_short_hex_when_present() {
-        if let Some(sha) = GIT_SHA {
-            assert!(
-                sha.len() >= 7 && sha.len() <= 40,
-                "unexpected git sha length: {}",
-                sha
-            );
-            assert!(
-                sha.chars().all(|c| c.is_ascii_hexdigit()),
-                "unexpected git sha characters: {}",
-                sha
-            );
-        }
     }
 }
 
@@ -272,5 +243,37 @@ pub fn bracket_tag_cyan_when_on(color: bool, on: bool, inner: &str) -> String {
         format!("[{}]", inner).cyan().to_string()
     } else {
         format!("[{}]", inner).dimmed().to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GIT_SHA, RELEASE_VERSION};
+
+    #[test]
+    fn release_version_is_semver_like() {
+        assert!(
+            RELEASE_VERSION
+                .split('.')
+                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())),
+            "unexpected release version: {}",
+            RELEASE_VERSION
+        );
+    }
+
+    #[test]
+    fn git_sha_is_short_hex_when_present() {
+        if let Some(sha) = GIT_SHA {
+            assert!(
+                sha.len() >= 7 && sha.len() <= 40,
+                "unexpected git sha length: {}",
+                sha
+            );
+            assert!(
+                sha.chars().all(|c| c.is_ascii_hexdigit()),
+                "unexpected git sha characters: {}",
+                sha
+            );
+        }
     }
 }
