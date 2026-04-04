@@ -12,10 +12,9 @@ use crate::helix_store::{
 use crate::pack::{load_manifest, resolve_pack_dir, resolve_source_roots};
 use crate::registry::pack_dir_for_path;
 
-use super::{
-    AppState, JobRecord, JobState, JobType, job_is_index_work, job_targets_this_pack,
-    load_pack_docs, resolve_strict_local_pack_root,
-};
+use super::jobs::{JobRecord, JobState, JobType, job_is_index_work, job_targets_this_pack};
+use super::pack_helpers::resolve_strict_local_pack_root;
+use super::{AppState, load_pack_docs};
 
 #[derive(Deserialize, Default)]
 pub(super) struct StatusQuery {

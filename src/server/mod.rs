@@ -20,24 +20,20 @@ use crate::cloud::{
 };
 use crate::google::{self, GoogleAuthenticator};
 use crate::helix_store::{helix_load_all_docs, helix_pack_path_for_local};
-use crate::pack::{add_source_root, has_manifest_at, init_pack, resolve_pack_dir};
+use crate::pack::{add_source_root, resolve_pack_dir};
 use crate::pack_location::PackLocation;
-use crate::registry::{
-    ensure_registered, load_registry, pack_dir_for_path, resolve_pack_by_name_or_path,
-};
+use crate::registry::pack_dir_for_path;
 use crate::types::SourceDoc;
 
 mod add_route;
 mod jobs;
 mod mcp_route;
+mod pack_helpers;
 mod publish_route;
 mod query_route;
 mod status_route;
 use add_route::add_now;
-use jobs::{
-    JobRecord, JobRegistry, JobState, JobType, enqueue_index_job, enqueue_remove_job,
-    job_is_index_work, job_targets_this_pack, start_next_job_if_idle,
-};
+use jobs::{JobRegistry, enqueue_remove_job, start_next_job_if_idle};
 use mcp_route::mcp;
 use publish_route::publish;
 use query_route::query;
@@ -448,85 +444,6 @@ async fn graph_view() -> Html<&'static str> {
 </body>
 </html>"#,
     )
-}
-
-/// Resolve pack root for "add directory": pack override or first pack. Used when we may create the pack.
-fn resolve_pack_root_for_add(
-    state: &AppState,
-    pack_override: Option<&str>,
-) -> Result<PathBuf, (StatusCode, Json<Value>)> {
-    let root = if let Some(p) = pack_override {
-        resolve_strict_local_pack_root(p).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error":{"code":"PATH_INVALID","message":e.to_string()}})),
-            )
-        })?
-    } else {
-        state.packs.first().cloned().ok_or((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":{"code":"NO_PACK","message":"no pack configured"}})),
-        ))?
-    };
-    Ok(root)
-}
-
-/// Resolve pack dir for documents/conversation add: path (pack path) or pack override or first pack.
-fn resolve_pack_dir_for_docs(
-    state: &AppState,
-    path: Option<&str>,
-    pack_override: Option<&str>,
-) -> Result<PathBuf, (StatusCode, Json<Value>)> {
-    if let Some(p) = pack_override {
-        return resolve_strict_local_pack_dir(p).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error":{"code":"PATH_INVALID","message":e.to_string()}})),
-            )
-        });
-    }
-    if let Some(path) = path {
-        return resolve_strict_local_pack_dir(path).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error":{"code":"PATH_INVALID","message":e.to_string()}})),
-            )
-        });
-    }
-    state.packs.first().map(|r| pack_dir_for_path(r)).ok_or((
-        StatusCode::BAD_REQUEST,
-        Json(json!({"error":{"code":"NO_PACK","message":"no pack configured"}})),
-    ))
-}
-
-fn resolve_strict_local_pack_root(selector: &str) -> anyhow::Result<PathBuf> {
-    let pack_root = resolve_pack_by_name_or_path(selector)?;
-    if !has_manifest_at(&pack_root) {
-        anyhow::bail!("no memory pack at {}", pack_root.display());
-    }
-    Ok(pack_root)
-}
-
-fn resolve_strict_local_pack_dir(selector: &str) -> anyhow::Result<PathBuf> {
-    let pack_root = resolve_strict_local_pack_root(selector)?;
-    let pack_dir = resolve_pack_dir(&pack_root);
-    if !pack_dir.join("manifest.json").exists() {
-        anyhow::bail!("no memory pack at {}", pack_root.display());
-    }
-    Ok(pack_dir)
-}
-
-/// Create pack at pack_dir if manifest.json does not exist.
-fn ensure_pack_exists(pack_dir: &Path) -> anyhow::Result<()> {
-    if pack_dir.join("manifest.json").exists() {
-        return Ok(());
-    }
-    init_pack(pack_dir, false, "fastembed", "BAAI/bge-small-en-v1.5", 384)?;
-    let pack_root = pack_dir.parent().unwrap_or(pack_dir).to_path_buf();
-    let normalized = pack_root.canonicalize()?.to_string_lossy().to_string();
-    let reg = load_registry().unwrap_or_default();
-    ensure_registered(&normalized, None, reg.packs.is_empty())?;
-    Ok(())
 }
 
 async fn remove_now(

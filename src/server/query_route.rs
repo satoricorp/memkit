@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::Json;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -12,9 +12,10 @@ use crate::query::{run_query, run_query_multi};
 use crate::query_synth::{QueryProvider, synthesize_answer_async};
 use crate::registry::pack_dir_for_path;
 
+use super::pack_helpers::resolve_strict_local_pack_dir;
 use super::{
     AppState, authenticated_cloud_context, default_top_k, default_use_reranker,
-    resolve_cloud_query_location, resolve_strict_local_pack_dir,
+    resolve_cloud_query_location,
 };
 
 #[derive(Deserialize)]
@@ -152,14 +153,16 @@ pub(super) async fn query(
                 })));
             }
 
-            let (answer, provider) = synthesize_answer_async(&req.query, &resp)
-                .await
-                .map_err(|e| {
+            let (answer, provider) = synthesize_answer_async(&req.query, &resp).await.map_err(
+                |e| {
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error":{"code":"QUERY_SYNTH_FAILED","message":e.to_string()}})),
+                        Json(
+                            json!({"error":{"code":"QUERY_SYNTH_FAILED","message":e.to_string()}}),
+                        ),
                     )
-                })?;
+                },
+            )?;
             let provider_label = match provider {
                 QueryProvider::None => "none".to_string(),
                 QueryProvider::OpenAI(model) => model,

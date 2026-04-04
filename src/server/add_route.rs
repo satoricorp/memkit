@@ -14,10 +14,11 @@ use crate::google::{
     fetch_doc_content, fetch_sheet_content, get_access_token, parse_doc_id, parse_sheet_ids,
 };
 
-use super::{
-    AppState, add_source_root, enqueue_index_job, ensure_pack_exists, pack_dir_for_path,
-    resolve_pack_dir_for_docs, resolve_pack_root_for_add, start_next_job_if_idle,
+use super::jobs::{enqueue_index_job, start_next_job_if_idle};
+use super::pack_helpers::{
+    ensure_pack_exists, resolve_pack_dir_for_docs, resolve_pack_root_for_add,
 };
+use super::{AppState, add_source_root, pack_dir_for_path};
 
 #[derive(Deserialize)]
 struct AddDocumentItem {
