@@ -26,6 +26,11 @@ pub struct UseSpec {
     pub cloud_url: UseField,
 }
 
+pub enum CommandOut {
+    Done,
+    Output(serde_json::Value),
+}
+
 pub enum CliCommand {
     Add {
         local_path: Option<String>,
