@@ -10,7 +10,7 @@ use axum::response::Html;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
@@ -20,7 +20,7 @@ use crate::cloud::{
 };
 use crate::google::{self, GoogleAuthenticator};
 use crate::helix_store::{helix_load_all_docs, helix_pack_path_for_local};
-use crate::pack::{add_source_root, resolve_pack_dir};
+use crate::pack::add_source_root;
 use crate::pack_location::PackLocation;
 use crate::registry::pack_dir_for_path;
 use crate::types::SourceDoc;
@@ -31,12 +31,14 @@ mod mcp_route;
 mod pack_helpers;
 mod publish_route;
 mod query_route;
+mod remove_route;
 mod status_route;
 use add_route::add_now;
-use jobs::{JobRegistry, enqueue_remove_job, start_next_job_if_idle};
+use jobs::JobRegistry;
 use mcp_route::mcp;
 use publish_route::publish;
 use query_route::query;
+use remove_route::remove_now;
 use status_route::status;
 
 fn load_pack_docs(pack: &Path, dim: usize) -> anyhow::Result<Vec<SourceDoc>> {
@@ -57,11 +59,6 @@ struct AppState {
     jobs: Arc<Mutex<JobRegistry>>,
     google: Option<Arc<GoogleAuthState>>,
     google_load_error: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-struct RemoveRequest {
-    path: Option<String>,
 }
 
 fn default_top_k() -> usize {
@@ -444,43 +441,4 @@ async fn graph_view() -> Html<&'static str> {
 </body>
 </html>"#,
     )
-}
-
-async fn remove_now(
-    State(state): State<AppState>,
-    Json(req): Json<RemoveRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let path = req.path.as_deref().ok_or((
-        StatusCode::BAD_REQUEST,
-        Json(json!({
-            "error": { "code": "PATH_REQUIRED", "message": "remove requires path" }
-        })),
-    ))?;
-    let dir = PathBuf::from(path)
-        .canonicalize()
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error":{"code":"PATH_INVALID","message":format!("path not accessible: {}", e)}})),
-            )
-        })?;
-    let pack_dir = resolve_pack_dir(&dir);
-    if !pack_dir.join("manifest.json").exists() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": { "code": "PACK_NOT_FOUND", "message": "No pack found at path" }
-            })),
-        ));
-    }
-    let pack_root = pack_dir
-        .parent()
-        .unwrap_or(pack_dir.as_path())
-        .to_path_buf();
-    let job = enqueue_remove_job(&state, pack_root.to_string_lossy().to_string()).await;
-    start_next_job_if_idle(state.clone());
-    Ok(Json(json!({
-        "status": "accepted",
-        "job": job
-    })))
 }
