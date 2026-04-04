@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use axum::body::{Body, to_bytes};
 use axum::extract::State;
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
@@ -16,9 +15,8 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::cloud::{
-    CloudCurrentPointer, CloudPackMetadata, CloudPackSummary, CloudPackUri, CloudTenantKind,
-    cloud_root, ensure_cloud_pack_dirs, parse_cloud_pack_uri, read_current_pointer,
-    read_pack_metadata, summarize_cloud_pack, write_json_atomically,
+    CloudPackSummary, CloudPackUri, CloudTenantKind, cloud_root, parse_cloud_pack_uri,
+    read_current_pointer, summarize_cloud_pack,
 };
 use crate::google::{self, GoogleAuthenticator};
 use crate::helix_store::{helix_load_all_docs, helix_pack_path_for_local, remove_helix_for_pack};
@@ -28,8 +26,6 @@ use crate::pack::{
     resolve_pack_dir, resolve_source_roots, scrub_pack_from_dir,
 };
 use crate::pack_location::PackLocation;
-use crate::publish::{sha256_for_path, unpack_cloud_publish_archive};
-use crate::query::{run_query, run_query_multi};
 use crate::registry::{
     ensure_registered, load_registry, pack_dir_for_path, remove_pack_by_path,
     resolve_pack_by_name_or_path,
@@ -38,10 +34,14 @@ use crate::types::SourceDoc;
 
 mod add_route;
 mod jobs;
+mod mcp_route;
+mod publish_route;
 mod query_route;
 mod status_route;
 use add_route::add_now;
 use jobs::{JobRecord, JobRegistry, JobState, JobType};
+use mcp_route::mcp;
+use publish_route::publish;
 use query_route::query;
 use status_route::status;
 
@@ -469,217 +469,6 @@ async fn graph_view() -> Html<&'static str> {
     )
 }
 
-async fn publish(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Body,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let raw_pack_uri = header_string(&headers, "x-memkit-pack-uri").ok_or((
-        StatusCode::BAD_REQUEST,
-        Json(json!({"error":{"code":"PACK_URI_REQUIRED","message":"x-memkit-pack-uri header required"}})),
-    ))?;
-    let pack_uri = parse_cloud_pack_uri(&raw_pack_uri).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error":{"code":"INVALID_PACK_URI","message":e.to_string()}})),
-        )
-    })?;
-    let auth = authenticated_cloud_context(&headers).await?;
-    authorize_cloud_uri(&auth, &pack_uri)?;
-
-    let overwrite = header_string(&headers, "x-memkit-overwrite")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
-    let expected_sha = header_string(&headers, "x-memkit-sha256");
-    let display_name = header_string(&headers, "x-memkit-pack-name");
-
-    let bytes = to_bytes(body, temp_upload_limit_bytes())
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error":{"code":"UPLOAD_READ_FAILED","message":e.to_string()}})),
-            )
-        })?;
-
-    let upload_path = unique_temp_upload_path("publish");
-    if let Some(parent) = upload_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error":{"code":"UPLOAD_PREPARE_FAILED","message":format!("failed to create {}: {}", parent.display(), e)}})),
-            )
-        })?;
-    }
-    tokio::fs::write(&upload_path, &bytes).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":{"code":"UPLOAD_WRITE_FAILED","message":format!("failed to write {}: {}", upload_path.display(), e)}})),
-        )
-    })?;
-    drop(bytes);
-
-    let upload_path_for_hash = upload_path.clone();
-    let (computed_sha, size_bytes) =
-        tokio::task::spawn_blocking(move || sha256_for_path(&upload_path_for_hash))
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error":{"code":"UPLOAD_HASH_FAILED","message":e.to_string()}})),
-                )
-            })?
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error":{"code":"UPLOAD_HASH_FAILED","message":e.to_string()}})),
-                )
-            })?;
-
-    if let Some(ref expected_sha) = expected_sha {
-        if expected_sha != &computed_sha {
-            let _ = tokio::fs::remove_file(&upload_path).await;
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(
-                    json!({"error":{"code":"CHECKSUM_MISMATCH","message":"uploaded artifact checksum mismatch"}}),
-                ),
-            ));
-        }
-    }
-
-    ensure_cloud_pack_dirs(&pack_uri, &state.cloud_root).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":{"code":"PACK_PREPARE_FAILED","message":e.to_string()}})),
-        )
-    })?;
-
-    let current = read_current_pointer(&pack_uri, &state.cloud_root).ok();
-    if let Some(ref current) = current {
-        if current.sha256 == computed_sha {
-            let _ = tokio::fs::remove_file(&upload_path).await;
-            return Ok(Json(json!({
-                "status": "ok",
-                "pack_uri": pack_uri.to_string(),
-                "revision": current.revision,
-                "sha256": current.sha256,
-                "size_bytes": size_bytes,
-                "unchanged": true,
-            })));
-        }
-        if !overwrite {
-            let _ = tokio::fs::remove_file(&upload_path).await;
-            return Err((
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": {
-                        "code": "PUBLISH_CONFLICT",
-                        "message": "cloud pack already exists with different content; retry with overwrite=true"
-                    },
-                    "current_revision": current.revision,
-                    "current_sha256": current.sha256,
-                })),
-            ));
-        }
-    }
-
-    let revision_id = format!("rev-{}", uuid::Uuid::new_v4());
-    let revision_root = pack_uri.revision_root(&state.cloud_root, &revision_id);
-    let upload_path_for_unpack = upload_path.clone();
-    let revision_root_for_unpack = revision_root.clone();
-    let unpacked = tokio::task::spawn_blocking(move || {
-        unpack_cloud_publish_archive(&upload_path_for_unpack, &revision_root_for_unpack)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":{"code":"PUBLISH_UNPACK_FAILED","message":e.to_string()}})),
-        )
-    })?;
-    let unpacked = match unpacked {
-        Ok(artifact) => artifact,
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&upload_path).await;
-            let _ = tokio::fs::remove_dir_all(&revision_root).await;
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error":{"code":"PUBLISH_INVALID_ARTIFACT","message":e.to_string()}})),
-            ));
-        }
-    };
-    if unpacked.manifest.pack_id != pack_uri.pack_id {
-        let _ = tokio::fs::remove_file(&upload_path).await;
-        let _ = tokio::fs::remove_dir_all(&revision_root).await;
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": {
-                    "code": "PACK_ID_MISMATCH",
-                    "message": format!(
-                        "artifact pack_id {} does not match publish target {}",
-                        unpacked.manifest.pack_id,
-                        pack_uri
-                    )
-                }
-            })),
-        ));
-    }
-
-    let now = Utc::now();
-    let mut metadata =
-        read_pack_metadata(&pack_uri, &state.cloud_root).unwrap_or(CloudPackMetadata {
-            pack_uri: pack_uri.to_string(),
-            pack_id: pack_uri.pack_id.clone(),
-            tenant_type: pack_uri.tenant_kind,
-            tenant_id: pack_uri.tenant_id.clone(),
-            display_name: None,
-            source_pack_id: None,
-            current_revision: None,
-            created_at: now,
-            updated_at: now,
-        });
-    metadata.current_revision = Some(revision_id.clone());
-    metadata.display_name = display_name
-        .clone()
-        .or(metadata.display_name)
-        .or_else(|| Some(pack_uri.display_name()));
-    metadata.source_pack_id = None;
-    metadata.updated_at = now;
-
-    let current_pointer = CloudCurrentPointer {
-        revision: revision_id.clone(),
-        sha256: computed_sha.clone(),
-        published_at: now,
-    };
-    write_json_atomically(&pack_uri.pack_json_path(&state.cloud_root), &metadata).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":{"code":"PACK_METADATA_WRITE_FAILED","message":e.to_string()}})),
-        )
-    })?;
-    write_json_atomically(&pack_uri.current_path(&state.cloud_root), &current_pointer).map_err(
-        |e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error":{"code":"CURRENT_POINTER_WRITE_FAILED","message":e.to_string()}})),
-            )
-        },
-    )?;
-
-    let _ = tokio::fs::remove_file(&upload_path).await;
-    Ok(Json(json!({
-        "status": "ok",
-        "pack_uri": pack_uri.to_string(),
-        "revision": revision_id,
-        "sha256": computed_sha,
-        "size_bytes": size_bytes,
-        "manifest_path": unpacked.manifest_path,
-        "helix_path": unpacked.helix_path,
-    })))
-}
-
 /// Resolve pack root for "add directory": pack override or first pack. Used when we may create the pack.
 fn resolve_pack_root_for_add(
     state: &AppState,
@@ -978,145 +767,4 @@ fn start_next_job_if_idle(state: AppState) {
 
         start_next_job_if_idle(state.clone());
     });
-}
-
-async fn mcp(
-    State(state): State<AppState>,
-    Json(payload): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let method = payload.get("method").and_then(Value::as_str).unwrap_or("");
-    let id = payload.get("id").cloned().unwrap_or(json!(null));
-
-    let result = match method {
-        "initialize" => json!({
-            "protocolVersion": "2024-11-05",
-            "serverInfo": {
-                "name":"memkit",
-                "version": crate::term::release_version(),
-                "gitSha": crate::term::git_sha()
-            },
-            "capabilities": {"tools": {}}
-        }),
-        "tools/list" => json!({
-            "tools": [
-                {"name":"memory_query","description":"Query local memory pack","inputSchema":{
-                    "type":"object","properties":{
-                        "query":{"type":"string"},
-                        "top_k":{"type":"number"},
-                        "use_reranker":{"type":"boolean"}
-                    },
-                    "required":["query"]
-                }},
-                {"name":"memory_status","description":"Return daemon status","inputSchema":{"type":"object","properties":{}}},
-                {"name":"memory_sources","description":"List active memory source roots","inputSchema":{"type":"object","properties":{}}}
-            ]
-        }),
-        "tools/call" => {
-            let name = payload
-                .get("params")
-                .and_then(|p| p.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let args = payload
-                .get("params")
-                .and_then(|p| p.get("arguments"))
-                .cloned()
-                .unwrap_or_else(|| json!({}));
-
-            match name {
-                "memory_query" => {
-                    let query = args
-                        .get("query")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    let top_k = args.get("top_k").and_then(Value::as_u64).unwrap_or(8) as usize;
-                    let use_reranker = args
-                        .get("use_reranker")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(true);
-
-                    let pack_dirs: Vec<PathBuf> = state
-                        .packs
-                        .iter()
-                        .map(|r| pack_dir_for_path(r.as_path()))
-                        .collect();
-                    let resp = if state.packs.len() > 1 {
-                        run_query_multi(&pack_dirs, &query, top_k, use_reranker, None)
-                    } else {
-                        let Some(p) = pack_dirs.first() else {
-                            return Ok(Json(json!({
-                                "jsonrpc":"2.0",
-                                "id":id,
-                                "result":{"isError": true, "content":[{"type":"text","text":"no pack configured"}]}
-                            })));
-                        };
-                        run_query(&PackLocation::local(p), &query, top_k, use_reranker, None)
-                    };
-                    match resp {
-                        Ok(r) => json!({
-                            "content":[{"type":"text","text":json!({
-                                "mode": r.mode,
-                                "timings_ms": r.timings_ms,
-                                "results": r.results,
-                                "grouped_results": r.grouped_results
-                            }).to_string()}]
-                        }),
-                        Err(e) => {
-                            json!({"isError": true, "content":[{"type":"text","text":e.to_string()}]})
-                        }
-                    }
-                }
-                "memory_status" => {
-                    let pack_path_display = state
-                        .packs
-                        .first()
-                        .map(|p| {
-                            let is_home = dirs::home_dir()
-                                .as_ref()
-                                .and_then(|h| h.canonicalize().ok())
-                                .as_ref()
-                                == p.canonicalize().as_ref().ok();
-                            if is_home {
-                                "~/.memkit".to_string()
-                            } else {
-                                p.display().to_string()
-                            }
-                        })
-                        .unwrap_or_default();
-                    json!({
-                        "content":[{"type":"text","text":json!({
-                            "status":"ok",
-                            "pack_path": pack_path_display,
-                            "pack_paths": state.packs.iter().map(|p| {
-                                let is_home = dirs::home_dir().as_ref().and_then(|h| h.canonicalize().ok()).as_ref() == p.canonicalize().as_ref().ok();
-                                if is_home { "~/.memkit".to_string() } else { p.display().to_string() }
-                            }).collect::<Vec<_>>()
-                        }).to_string()}]
-                    })
-                }
-                "memory_sources" => {
-                    let mut all_sources = Vec::new();
-                    for pack_root in state.packs.iter() {
-                        let pack_dir = pack_dir_for_path(pack_root);
-                        if let Ok(m) = load_manifest(&pack_dir) {
-                            all_sources.extend(m.sources);
-                        }
-                    }
-                    json!({
-                        "content":[{"type":"text","text":json!({"sources":all_sources}).to_string()}]
-                    })
-                }
-                _ => json!({"isError": true, "content":[{"type":"text","text":"unknown tool"}]}),
-            }
-        }
-        _ => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error":{"code":"BAD_METHOD","message":"unsupported method"}})),
-            ));
-        }
-    };
-
-    Ok(Json(json!({"jsonrpc":"2.0","id":id,"result":result})))
 }
