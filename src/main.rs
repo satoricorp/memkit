@@ -44,6 +44,35 @@ struct CliContext {
     dry_run: bool,
 }
 
+enum CommandOut {
+    Done,
+    Output(serde_json::Value),
+}
+
+fn output_json_enabled(ctx: &CliContext) -> bool {
+    ctx.output_format == OutputFormat::Json
+}
+
+fn command_requires_server(cmd: &CliCommand) -> bool {
+    !matches!(
+        cmd,
+        CliCommand::Help
+            | CliCommand::Version
+            | CliCommand::Schema { .. }
+            | CliCommand::Login
+            | CliCommand::Logout
+            | CliCommand::WhoAmI
+            | CliCommand::Use(_)
+            | CliCommand::Doctor
+            | CliCommand::Serve { .. }
+            | CliCommand::Stop { .. }
+            | CliCommand::Publish { .. }
+            | CliCommand::List
+            | CliCommand::Status { dir: None }
+            | CliCommand::Query { .. }
+    )
+}
+
 fn parse_global_flags(args: &[String]) -> (Vec<String>, CliContext) {
     let mut filtered = Vec::with_capacity(args.len());
     let mut output_format = OutputFormat::Text;
@@ -1134,6 +1163,76 @@ fn print_whoami_text(out: &crate::auth::WhoAmIResponse) {
     }
 }
 
+async fn handle_status_command(
+    cfg: &ServerConfig,
+    output_json: bool,
+    dir: Option<&str>,
+) -> Result<CommandOut> {
+    if dir.is_none() {
+        let data = cli_client::list(&cfg, output_json, cli_client::ListOutputKind::Status).await?;
+        if output_json {
+            println!("{}", serde_json::to_string_pretty(&data)?);
+        }
+        return Ok(CommandOut::Done);
+    }
+
+    let data = cli_client::status(&cfg, dir).await?;
+    if output_json {
+        println!("{}", serde_json::to_string_pretty(&data)?);
+    } else {
+        cli_client::print_status(&data);
+    }
+    Ok(CommandOut::Done)
+}
+
+async fn handle_list_command(cfg: &ServerConfig, output_json: bool) -> Result<CommandOut> {
+    let pack_data = cli_client::list(&cfg, output_json, cli_client::ListOutputKind::Full).await?;
+    if output_json {
+        let merged = serde_json::json!({
+            "packs": pack_data,
+            "models": models_json_value(),
+        });
+        println!("{}", serde_json::to_string_pretty(&merged)?);
+    } else {
+        print_models_section();
+    }
+    Ok(CommandOut::Done)
+}
+
+fn print_doctor_summary(data: &serde_json::Value) {
+    let c = crate::term::color_stdout();
+    let url = data["server_url"].as_str().unwrap_or("");
+    let reachable = data["server_reachable"].as_bool().unwrap_or(false);
+    if reachable {
+        print!("Server is reachable ");
+        println!("{}", crate::term::bracketed_cyan(c, url));
+    } else {
+        print!("Server is ");
+        print!("{}", crate::term::danger_words(c, "not reachable"));
+        print!(" ");
+        println!("{}", crate::term::bracketed_cyan(c, url));
+    }
+    let path = data["config_path"].as_str().unwrap_or("");
+    let config_ok = data["config_exists"].as_bool().unwrap_or(false);
+    if config_ok {
+        print!("Configuration is valid ");
+        println!("{}", crate::term::bracketed_cyan(c, path));
+    } else {
+        print!("Configuration file missing ");
+        println!("{}", crate::term::bracketed_cyan(c, path));
+    }
+}
+
+async fn handle_doctor_command(cfg: &ServerConfig, output_json: bool) -> Result<CommandOut> {
+    let data = cli_client::doctor(&cfg).await?;
+    if output_json {
+        println!("{}", serde_json::to_string_pretty(&data)?);
+    } else {
+        print_doctor_summary(&data);
+    }
+    Ok(CommandOut::Done)
+}
+
 /// If dotenvy fails to load a complex `.env` entry (for example a large inline JSON payload),
 /// salvage the file manually so later variables such as MEMKIT_AUTH_BASE_URL still load.
 /// Existing process env vars always win.
@@ -1415,28 +1514,10 @@ async fn run() -> Result<()> {
                 _ => {}
             }
 
-            let commands_need_server = match &cmd {
-                CliCommand::Help
-                | CliCommand::Version
-                | CliCommand::Schema { .. }
-                | CliCommand::Login
-                | CliCommand::Logout
-                | CliCommand::WhoAmI
-                | CliCommand::Use(_)
-                | CliCommand::Doctor
-                | CliCommand::Serve { .. }
-                | CliCommand::Stop { .. }
-                | CliCommand::Publish { .. }
-                | CliCommand::List
-                | CliCommand::Status { dir: None }
-                | CliCommand::Query { .. } => false,
-                _ => true,
-            };
             if matches!(&cmd, CliCommand::Doctor) {
-                cli_client::print_server_note_doctor(&cfg, ctx.output_format == OutputFormat::Json)
-                    .await;
+                cli_client::print_server_note_doctor(&cfg, output_json_enabled(&ctx)).await;
             }
-            if commands_need_server {
+            if command_requires_server(&cmd) {
                 let readonly_no_autostart = matches!(&cmd, CliCommand::Status { .. });
                 if readonly_no_autostart {
                     cli_client::require_server_running(&cfg).await?;
@@ -1453,11 +1534,6 @@ async fn run() -> Result<()> {
                     )
                     .await;
                 }
-            }
-
-            enum CommandOut {
-                Done,
-                Output(serde_json::Value),
             }
             let result: Result<CommandOut> = match cmd {
                 CliCommand::Remove { dir, yes: _ } => {
@@ -1606,71 +1682,10 @@ async fn run() -> Result<()> {
                     }
                 }
                 CliCommand::Status { dir } => {
-                    let output_json = ctx.output_format == OutputFormat::Json;
-                    if dir.is_none() {
-                        let data =
-                            cli_client::list(&cfg, output_json, cli_client::ListOutputKind::Status)
-                                .await?;
-                        if output_json {
-                            let json_str = serde_json::to_string_pretty(&data)?;
-                            println!("{}", json_str);
-                        }
-                        Ok(CommandOut::Done)
-                    } else {
-                        let data = cli_client::status(&cfg, dir.as_deref()).await?;
-                        if output_json {
-                            println!("{}", serde_json::to_string_pretty(&data)?);
-                        } else {
-                            cli_client::print_status(&data);
-                        }
-                        Ok(CommandOut::Done)
-                    }
+                    handle_status_command(&cfg, output_json_enabled(&ctx), dir.as_deref()).await
                 }
-                CliCommand::List => {
-                    let output_json = ctx.output_format == OutputFormat::Json;
-                    let pack_data =
-                        cli_client::list(&cfg, output_json, cli_client::ListOutputKind::Full)
-                            .await?;
-                    if output_json {
-                        let merged = serde_json::json!({
-                            "packs": pack_data,
-                            "models": models_json_value(),
-                        });
-                        println!("{}", serde_json::to_string_pretty(&merged)?);
-                    } else {
-                        print_models_section();
-                    }
-                    Ok(CommandOut::Done)
-                }
-                CliCommand::Doctor => {
-                    let data = cli_client::doctor(&cfg).await?;
-                    if ctx.output_format == OutputFormat::Json {
-                        println!("{}", serde_json::to_string_pretty(&data)?);
-                    } else {
-                        let c = crate::term::color_stdout();
-                        let url = data["server_url"].as_str().unwrap_or("");
-                        let reachable = data["server_reachable"].as_bool().unwrap_or(false);
-                        if reachable {
-                            print!("Server is reachable ");
-                            println!("{}", crate::term::bracketed_cyan(c, url));
-                        } else {
-                            print!("Server is ");
-                            print!("{}", crate::term::danger_words(c, "not reachable"));
-                            print!(" ");
-                            println!("{}", crate::term::bracketed_cyan(c, url));
-                        }
-                        let path = data["config_path"].as_str().unwrap_or("");
-                        let config_ok = data["config_exists"].as_bool().unwrap_or(false);
-                        if config_ok {
-                            print!("Configuration is valid ");
-                            println!("{}", crate::term::bracketed_cyan(c, path));
-                        } else {
-                            print!("Configuration file missing ");
-                            println!("{}", crate::term::bracketed_cyan(c, path));
-                        }
-                    }
-                    Ok(CommandOut::Done)
-                }
+                CliCommand::List => handle_list_command(&cfg, output_json_enabled(&ctx)).await,
+                CliCommand::Doctor => handle_doctor_command(&cfg, output_json_enabled(&ctx)).await,
                 CliCommand::Publish {
                     pack,
                     pack_uri,
