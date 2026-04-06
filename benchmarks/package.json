@@ -1,0 +1,18 @@
+{
+  "name": "longmemeval-benchmark",
+  "type": "module",
+  "scripts": {
+    "download": "bun run download_data.ts",
+    "run": "bun run run_longmemeval_benchmark.ts",
+    "run:20": "MAX_QUESTIONS=20 USE_RERANKER=0 bun run run_longmemeval_benchmark.ts",
+    "run:20:rerank": "MAX_QUESTIONS=20 USE_RERANKER=1 bun run run_longmemeval_benchmark.ts",
+    "summarize": "python3 summarize_longmemeval_misses.py"
+  },
+  "dependencies": {
+    "openai": "^4.77.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
+  }
+}
