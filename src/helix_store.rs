@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "helix")]
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -21,6 +21,10 @@ const ENTITY_IDS_FILE: &str = "entity_ids.json";
 /// (index, query, entity writes, remove) so concurrent handlers never hit `Env already open`.
 #[cfg(feature = "helix")]
 static HELIX_STORE_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+#[cfg(feature = "helix")]
+static HELIX_STORAGE_CACHE: OnceLock<
+    Mutex<HashMap<PathBuf, Arc<helix_db::helix_engine::storage_core::HelixGraphStorage>>>,
+> = OnceLock::new();
 
 #[cfg(feature = "helix")]
 fn helix_store_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -68,6 +72,7 @@ pub fn remove_helix_for_pack(pack_root: &Path) -> Result<()> {
     use std::fs;
     for candidate in [pack_root.to_path_buf(), pack_root.join(".memkit")] {
         let path = helix_pack_path_for_local(&candidate);
+        clear_helix_storage_cache(&path);
         if path.exists() && path.is_dir() {
             fs::remove_dir_all(&path).context("failed to remove Helix pack DB")?;
         }
@@ -78,14 +83,25 @@ pub fn remove_helix_for_pack(pack_root: &Path) -> Result<()> {
 #[cfg(feature = "helix")]
 fn open_helix_storage(
     path: &Path,
-) -> Result<std::sync::Arc<helix_db::helix_engine::storage_core::HelixGraphStorage>> {
+) -> Result<Arc<helix_db::helix_engine::storage_core::HelixGraphStorage>> {
     use helix_db::helix_engine::storage_core::version_info::VersionInfo;
     use helix_db::helix_engine::traversal_core::config::Config;
 
-    let path_str = path
+    std::fs::create_dir_all(path).context("create helix pack dir")?;
+    let cache_key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let cache = HELIX_STORAGE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(storage) = cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(storage);
+    }
+
+    let path_str = cache_key
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("non-UTF8 path"))?;
-    std::fs::create_dir_all(path).context("create helix pack dir")?;
     let config = Config::default();
     let version_info = VersionInfo::default();
     let storage = helix_db::helix_engine::storage_core::HelixGraphStorage::new(
@@ -94,7 +110,23 @@ fn open_helix_storage(
         version_info,
     )
     .map_err(|e| anyhow::anyhow!("helix open: {:?}", e))?;
-    Ok(std::sync::Arc::new(storage))
+    let storage = Arc::new(storage);
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(cache_key, storage.clone());
+    Ok(storage)
+}
+
+#[cfg(feature = "helix")]
+fn clear_helix_storage_cache(path: &Path) {
+    if let Some(cache) = HELIX_STORAGE_CACHE.get() {
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        guard.remove(path);
+        if let Ok(canonical) = path.canonicalize() {
+            guard.remove(&canonical);
+        }
+    }
 }
 
 #[cfg(feature = "helix")]
@@ -108,7 +140,7 @@ fn doc_to_properties_and_embedding<'a>(
     use helix_db::protocol::value::Value;
 
     let embedding_f64: Vec<f64> = doc.embedding.iter().map(|&x| x as f64).collect();
-    let keys_and_values: Vec<(&str, Value)> = vec![
+    let mut keys_and_values: Vec<(&str, Value)> = vec![
         ("chunk_id", Value::String(doc.chunk_id.clone())),
         ("source_path", Value::String(doc.source_path.clone())),
         ("content", Value::String(doc.content.clone())),
@@ -118,6 +150,70 @@ fn doc_to_properties_and_embedding<'a>(
         ("end_offset", Value::I64(doc.end_offset as i64)),
         ("indexed_at", Value::String(doc.indexed_at.to_rfc3339())),
     ];
+    keys_and_values.push(("doc_kind", Value::String(doc.memory.doc_kind.clone())));
+    if let Some(value) = &doc.memory.record_type {
+        keys_and_values.push(("record_type", Value::String(value.clone())));
+    }
+    if let Some(value) = &doc.memory.session_id {
+        keys_and_values.push(("session_id", Value::String(value.clone())));
+    }
+    if let Some(value) = doc.memory.session_index {
+        keys_and_values.push(("session_index", Value::I64(value as i64)));
+    }
+    if let Some(value) = doc.memory.turn_start {
+        keys_and_values.push(("turn_start", Value::I64(value as i64)));
+    }
+    if let Some(value) = doc.memory.turn_end {
+        keys_and_values.push(("turn_end", Value::I64(value as i64)));
+    }
+    if let Some(value) = &doc.memory.role {
+        keys_and_values.push(("role", Value::String(value.clone())));
+    }
+    if let Some(value) = &doc.memory.session_time_start {
+        keys_and_values.push(("session_time_start", Value::String(value.to_rfc3339())));
+    }
+    if let Some(value) = &doc.memory.session_time_end {
+        keys_and_values.push(("session_time_end", Value::String(value.to_rfc3339())));
+    }
+    if let Some(value) = &doc.memory.context_time_start {
+        keys_and_values.push(("context_time_start", Value::String(value.to_rfc3339())));
+    }
+    if let Some(value) = &doc.memory.context_time_end {
+        keys_and_values.push(("context_time_end", Value::String(value.to_rfc3339())));
+    }
+    if let Some(value) = &doc.memory.context_time_text {
+        keys_and_values.push(("context_time_text", Value::String(value.clone())));
+    }
+    if let Some(value) = &doc.memory.temporal_kind {
+        keys_and_values.push(("temporal_kind", Value::String(value.clone())));
+    }
+    if let Some(value) = doc.memory.temporal_confidence {
+        keys_and_values.push((
+            "temporal_confidence",
+            Value::String(format!("{:.3}", value)),
+        ));
+    }
+    if let Some(value) = &doc.memory.evidence_chunk_id {
+        keys_and_values.push(("evidence_chunk_id", Value::String(value.clone())));
+    }
+    if let Some(value) = &doc.memory.evidence_content {
+        keys_and_values.push(("evidence_content", Value::String(value.clone())));
+    }
+    if let Some(value) = &doc.memory.extraction_provider {
+        keys_and_values.push(("extraction_provider", Value::String(value.clone())));
+    }
+    if let Some(value) = &doc.memory.extraction_model {
+        keys_and_values.push(("extraction_model", Value::String(value.clone())));
+    }
+    if let Some(value) = &doc.memory.relation_kind {
+        keys_and_values.push(("relation_kind", Value::String(value.clone())));
+    }
+    if let Some(value) = &doc.memory.entity_kind {
+        keys_and_values.push(("entity_kind", Value::String(value.clone())));
+    }
+    if let Some(value) = &doc.memory.value_kind {
+        keys_and_values.push(("value_kind", Value::String(value.clone())));
+    }
     let len = keys_and_values.len();
     let items = keys_and_values.into_iter().map(|(k, v)| {
         let k_arena = arena.alloc_str(k);
@@ -161,6 +257,7 @@ pub fn helix_rebuild_chunks(path: &Path, docs: &[SourceDoc], _embedding_dim: usi
     #[cfg(feature = "helix")]
     {
         let _guard = helix_store_guard();
+        clear_helix_storage_cache(path);
         if path.exists() {
             std::fs::remove_dir_all(path).context("remove existing helix dir")?;
         }
@@ -217,6 +314,18 @@ fn value_as_i64(v: &helix_db::protocol::value::Value) -> Option<i64> {
 }
 
 #[cfg(feature = "helix")]
+fn value_as_datetime(v: &helix_db::protocol::value::Value) -> Option<chrono::DateTime<Utc>> {
+    value_as_str(v)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+#[cfg(feature = "helix")]
+fn value_as_f32(v: &helix_db::protocol::value::Value) -> Option<f32> {
+    value_as_str(v).and_then(|s| s.parse::<f32>().ok())
+}
+
+#[cfg(feature = "helix")]
 fn hvector_to_source_doc(
     v: &helix_db::helix_engine::vector_core::vector::HVector,
 ) -> Option<SourceDoc> {
@@ -236,9 +345,7 @@ fn hvector_to_source_doc(
     let end_offset = p.get("end_offset").and_then(value_as_i64).unwrap_or(0) as usize;
     let indexed_at = p
         .get("indexed_at")
-        .and_then(value_as_str)
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.with_timezone(&Utc))
+        .and_then(value_as_datetime)
         .unwrap_or_else(Utc::now);
     let embedding: Vec<f32> = v.data.iter().map(|&x| x as f32).collect();
     Some(SourceDoc {
@@ -251,6 +358,66 @@ fn hvector_to_source_doc(
         content_hash,
         embedding,
         indexed_at,
+        memory: crate::types::MemoryMetadata {
+            doc_kind: p
+                .get("doc_kind")
+                .and_then(value_as_str)
+                .map(String::from)
+                .unwrap_or_else(|| "source_chunk".to_string()),
+            record_type: p
+                .get("record_type")
+                .and_then(value_as_str)
+                .map(String::from),
+            session_id: p.get("session_id").and_then(value_as_str).map(String::from),
+            session_index: p
+                .get("session_index")
+                .and_then(value_as_i64)
+                .map(|v| v as usize),
+            turn_start: p
+                .get("turn_start")
+                .and_then(value_as_i64)
+                .map(|v| v as usize),
+            turn_end: p.get("turn_end").and_then(value_as_i64).map(|v| v as usize),
+            role: p.get("role").and_then(value_as_str).map(String::from),
+            session_time_start: p.get("session_time_start").and_then(value_as_datetime),
+            session_time_end: p.get("session_time_end").and_then(value_as_datetime),
+            context_time_start: p.get("context_time_start").and_then(value_as_datetime),
+            context_time_end: p.get("context_time_end").and_then(value_as_datetime),
+            context_time_text: p
+                .get("context_time_text")
+                .and_then(value_as_str)
+                .map(String::from),
+            temporal_kind: p
+                .get("temporal_kind")
+                .and_then(value_as_str)
+                .map(String::from),
+            temporal_confidence: p.get("temporal_confidence").and_then(value_as_f32),
+            evidence_chunk_id: p
+                .get("evidence_chunk_id")
+                .and_then(value_as_str)
+                .map(String::from),
+            evidence_content: p
+                .get("evidence_content")
+                .and_then(value_as_str)
+                .map(String::from),
+            extraction_provider: p
+                .get("extraction_provider")
+                .and_then(value_as_str)
+                .map(String::from),
+            extraction_model: p
+                .get("extraction_model")
+                .and_then(value_as_str)
+                .map(String::from),
+            relation_kind: p
+                .get("relation_kind")
+                .and_then(value_as_str)
+                .map(String::from),
+            entity_kind: p
+                .get("entity_kind")
+                .and_then(value_as_str)
+                .map(String::from),
+            value_kind: p.get("value_kind").and_then(value_as_str).map(String::from),
+        },
     })
 }
 
@@ -338,6 +505,7 @@ pub fn helix_hybrid_query(
                         end_offset: Some(doc.end_offset),
                         source: "helix_vector".to_string(),
                         group_key: Some(doc.source_path),
+                        memory: doc.memory.clone(),
                     })
                 }
                 _ => None,
@@ -687,6 +855,7 @@ fn helix_index_and_load() {
             content_hash: "h1".to_string(),
             embedding: vec![0.1f32, 0.2, 0.3, 0.4],
             indexed_at,
+            memory: crate::types::MemoryMetadata::default(),
         },
         SourceDoc {
             chunk_id: "c2".to_string(),
@@ -698,6 +867,7 @@ fn helix_index_and_load() {
             content_hash: "h2".to_string(),
             embedding: vec![0.5f32, 0.6, 0.7, 0.8],
             indexed_at,
+            memory: crate::types::MemoryMetadata::default(),
         },
     ];
 

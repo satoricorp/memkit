@@ -4,31 +4,16 @@ use std::time::Instant;
 
 use anyhow::Result;
 
+use crate::conversation::{
+    build_query_note, expand_query_variants, query_time_analysis, shape_score_boost,
+    should_hydrate_evidence, temporal_score_boost,
+};
 use crate::embed::provider_from_name;
-use crate::helix_store::{helix_hybrid_query, helix_load_all_docs};
+use crate::helix_store::helix_hybrid_query;
 use crate::pack::load_manifest_from_loc;
 use crate::pack_location::PackLocation;
 use crate::rerank::{DEFAULT_RERANKER_MODEL, try_create_reranker};
-use crate::types::{QueryGroup, QueryHit, QueryResponse, QueryTimings};
-
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    if a.is_empty() || b.is_empty() || a.len() != b.len() {
-        return 0.0;
-    }
-    let mut dot = 0.0f32;
-    let mut na = 0.0f32;
-    let mut nb = 0.0f32;
-    for i in 0..a.len() {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    if na == 0.0 || nb == 0.0 {
-        0.0
-    } else {
-        dot / (na.sqrt() * nb.sqrt())
-    }
-}
+use crate::types::{QueryEvidence, QueryGroup, QueryHit, QueryResponse, QueryTimings};
 
 const RERANK_LIMIT: usize = 50;
 
@@ -43,7 +28,6 @@ pub fn run_query(
     let manifest = load_manifest_from_loc(loc)?;
     let dim = manifest.embedding.dimension;
     let helix_path = loc.helix_path();
-    let index_docs: Vec<_> = helix_load_all_docs(&helix_path, dim)?;
 
     let embed_start = Instant::now();
     let mut provider = provider_from_name(
@@ -62,51 +46,61 @@ pub fn run_query(
             Err(e)
         }
     })?;
-    let q_embedding = provider.embed_query(q)?;
+    let query_variants = expand_query_variants(q);
+    let variant_embeddings = query_variants
+        .iter()
+        .map(|variant| provider.embed_query(variant))
+        .collect::<Result<Vec<_>, _>>()?;
     let embed_ms = embed_start.elapsed().as_millis();
 
+    let query_time = query_time_analysis(q);
     let retrieval_start = Instant::now();
-    let top_for_backend = top_k.saturating_mul(2);
-    let mut hits: Vec<QueryHit> =
-        helix_hybrid_query(&helix_path, q, &q_embedding, top_for_backend, path_filter)?;
-    let retrieval_results = hits.clone();
-    let retrieval_ms = retrieval_start.elapsed().as_millis();
-
-    let rerank_start = Instant::now();
-
-    if hits.is_empty() {
-        let docs = index_docs.iter().filter(|d| {
-            path_filter.map_or(true, |pf| {
-                let p = d.source_path.replace('\\', "/");
-                let pf_norm = pf.replace('\\', "/");
-                p.contains(&pf_norm)
-            })
-        });
-        hits = docs
-            .map(|d| {
-                let vec = cosine(&q_embedding, &d.embedding);
-                QueryHit {
-                    score: vec,
-                    file_path: d.source_path.clone(),
-                    chunk_id: d.chunk_id.clone(),
-                    chunk_index: d.chunk_index,
-                    content: d.content.clone(),
-                    start_offset: Some(d.start_offset),
-                    end_offset: Some(d.end_offset),
-                    source: "vector".to_string(),
-                    group_key: Some(d.source_path.clone()),
+    let top_for_backend = top_k.saturating_mul(4).max(12);
+    let mut merged_hits: HashMap<String, QueryHit> = HashMap::new();
+    for (variant_index, (variant, embedding)) in query_variants
+        .iter()
+        .zip(variant_embeddings.iter())
+        .enumerate()
+    {
+        let variant_hits = helix_hybrid_query(
+            &helix_path,
+            variant,
+            embedding,
+            top_for_backend,
+            path_filter,
+        )?;
+        for mut hit in variant_hits {
+            hit.score -= variant_index as f32 * 0.01;
+            match merged_hits.get_mut(&hit.chunk_id) {
+                Some(existing) if hit.score > existing.score => *existing = hit,
+                None => {
+                    merged_hits.insert(hit.chunk_id.clone(), hit);
                 }
-            })
-            .filter(|h| h.score > 0.0)
-            .collect();
+                _ => {}
+            }
+        }
     }
-
+    let mut hits: Vec<QueryHit> = merged_hits.into_values().collect();
+    if hits
+        .iter()
+        .any(|hit| hit.memory.doc_kind == "memory_record")
+    {
+        hits.retain(|hit| hit.memory.doc_kind == "memory_record");
+    }
+    for hit in &mut hits {
+        hit.score += temporal_score_boost(hit, &query_time);
+        hit.score += shape_score_boost(hit, &query_time);
+    }
     hits.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.file_path.cmp(&b.file_path))
     });
+    let retrieval_results = hits.clone();
+    let retrieval_ms = retrieval_start.elapsed().as_millis();
+
+    let rerank_start = Instant::now();
 
     let mode = if use_reranker && !hits.is_empty() {
         if let Ok(Some(mut reranker)) = try_create_reranker(DEFAULT_RERANKER_MODEL) {
@@ -149,6 +143,26 @@ pub fn run_query(
 
     hits.truncate(top_k);
     let rerank_ms = rerank_start.elapsed().as_millis();
+    let hydrate_evidence = should_hydrate_evidence(&query_time, &hits);
+    let notes = hits
+        .iter()
+        .map(|hit| build_query_note(hit, hydrate_evidence, &query_time))
+        .collect::<Vec<_>>();
+    let hydrated_evidence = if hydrate_evidence {
+        hits.iter()
+            .filter_map(|hit| {
+                hit.memory
+                    .evidence_content
+                    .as_ref()
+                    .map(|evidence| QueryEvidence {
+                        chunk_id: hit.chunk_id.clone(),
+                        evidence: evidence.clone(),
+                    })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
 
     let mut group_map: HashMap<String, QueryGroup> = HashMap::new();
     for hit in &hits {
@@ -180,6 +194,7 @@ pub fn run_query(
     Ok(QueryResponse {
         results: hits,
         mode: mode.to_string(),
+        resolved_pack_path: loc.debug_display_path(),
         grouped_results,
         timings_ms: QueryTimings {
             embed: embed_ms,
@@ -188,6 +203,9 @@ pub fn run_query(
             total: total_start.elapsed().as_millis(),
         },
         retrieval_results: Some(retrieval_results),
+        notes,
+        hydrated_evidence,
+        query_time: Some(query_time),
     })
 }
 
@@ -237,12 +255,16 @@ pub fn run_query_multi(
 
     let mut all_hits = Vec::new();
     let mut all_grouped = Vec::new();
+    let mut all_notes = Vec::new();
+    let mut all_evidence = Vec::new();
     let mut max_embed = 0u128;
     let mut max_retrieval = 0u128;
     let mut max_rerank = 0u128;
     for r in &results {
         all_hits.extend(r.results.clone());
         all_grouped.extend(r.grouped_results.clone());
+        all_notes.extend(r.notes.clone());
+        all_evidence.extend(r.hydrated_evidence.clone());
         max_embed = max_embed.max(r.timings_ms.embed);
         max_retrieval = max_retrieval.max(r.timings_ms.retrieval);
         max_rerank = max_rerank.max(r.timings_ms.rerank);
@@ -266,6 +288,7 @@ pub fn run_query_multi(
     Ok(QueryResponse {
         results: all_hits,
         mode: if use_reranker { "rerank" } else { "fusion" }.to_string(),
+        resolved_pack_path: None,
         grouped_results,
         timings_ms: QueryTimings {
             embed: max_embed,
@@ -274,5 +297,8 @@ pub fn run_query_multi(
             total: total_start.elapsed().as_millis(),
         },
         retrieval_results: None,
+        notes: all_notes,
+        hydrated_evidence: all_evidence,
+        query_time: None,
     })
 }

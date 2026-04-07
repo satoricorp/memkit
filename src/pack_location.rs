@@ -28,9 +28,20 @@ impl PackLocation {
         }
     }
 
+    pub fn debug_display_path(&self) -> Option<String> {
+        match self {
+            PackLocation::Local(root) => Some(root.display().to_string()),
+            PackLocation::Cloud { revision_root } => Some(revision_root.display().to_string()),
+        }
+    }
+
     pub fn read_file(&self, rel_path: &str) -> Result<Vec<u8>> {
         match self {
-            PackLocation::Local(root) | PackLocation::Cloud { revision_root: root, .. } => {
+            PackLocation::Local(root)
+            | PackLocation::Cloud {
+                revision_root: root,
+                ..
+            } => {
                 let p = root.join(rel_path);
                 std::fs::read(&p).with_context(|| format!("failed to read {}", p.display()))
             }
@@ -39,7 +50,11 @@ impl PackLocation {
 
     pub fn write_file(&self, rel_path: &str, data: &[u8]) -> Result<()> {
         match self {
-            PackLocation::Local(root) | PackLocation::Cloud { revision_root: root, .. } => {
+            PackLocation::Local(root)
+            | PackLocation::Cloud {
+                revision_root: root,
+                ..
+            } => {
                 let p = root.join(rel_path);
                 if let Some(parent) = p.parent() {
                     std::fs::create_dir_all(parent).context("failed to create parent dir")?;
