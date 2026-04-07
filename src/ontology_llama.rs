@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
 
+#[cfg(not(feature = "llama-embedded"))]
 use std::path::Path;
 
 use crate::ontology::{LlmConfig, OntologyExtraction, OntologyProvider};
@@ -19,9 +20,11 @@ use llama_cpp_2::model::{AddBos, LlamaModel};
 #[cfg(feature = "llama-embedded")]
 use llama_cpp_2::sampling::LlamaSampler;
 #[cfg(feature = "llama-embedded")]
+use std::collections::HashMap;
+#[cfg(feature = "llama-embedded")]
 use std::num::NonZeroU32;
 #[cfg(feature = "llama-embedded")]
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 #[cfg(feature = "llama-embedded")]
 use std::time::Instant;
 
@@ -29,7 +32,7 @@ use std::time::Instant;
 pub struct LlamaOntologyProvider {
     config: LlmConfig,
     #[cfg(feature = "llama-embedded")]
-    model: LlamaModel,
+    model: Arc<LlamaModel>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,9 +71,7 @@ impl LlamaOntologyProvider {
         #[cfg(feature = "llama-embedded")]
         {
             let backend = llama_backend()?;
-            let model =
-                LlamaModel::load_from_file(backend, &config.model, &LlamaModelParams::default())
-                    .map_err(|e| anyhow!("failed to load llama model {}: {}", config.model, e))?;
+            let model = cached_llama_model(backend, &config.model)?;
             return Ok(Self { config, model });
         }
 
@@ -256,6 +257,32 @@ Keep at most {max_entities} entities and at most 24 relations. Output JSON only.
             Ok(text)
         }
     }
+}
+
+#[cfg(feature = "llama-embedded")]
+fn cached_llama_model(backend: &LlamaBackend, model_path: &str) -> Result<Arc<LlamaModel>> {
+    static MODELS: OnceLock<Mutex<HashMap<String, Arc<LlamaModel>>>> = OnceLock::new();
+    let cache = MODELS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(model) = cache
+        .lock()
+        .map_err(|_| anyhow!("llama model cache lock poisoned"))?
+        .get(model_path)
+        .cloned()
+    {
+        return Ok(model);
+    }
+
+    let model = Arc::new(
+        LlamaModel::load_from_file(backend, model_path, &LlamaModelParams::default())
+            .map_err(|e| anyhow!("failed to load llama model {}: {}", model_path, e))?,
+    );
+    let mut guard = cache
+        .lock()
+        .map_err(|_| anyhow!("llama model cache lock poisoned"))?;
+    Ok(guard
+        .entry(model_path.to_string())
+        .or_insert_with(|| model.clone())
+        .clone())
 }
 
 /// Resolve llama-cli binary path when not using llama-embedded.

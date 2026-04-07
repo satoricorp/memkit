@@ -15,7 +15,7 @@ name = "memkit-server"
 path = "src/bin/memkit-server.rs"
 
 [features]
-default = ["store-helix-only"]
+default = ["store-helix-only", "llama-embedded"]
 llama-embedded = ["dep:llama-cpp-2", "dep:encoding_rs"]
 # Helix backend (vector + graph, one LMDB per pack)
 helix = ["dep:helix-db", "dep:bumpalo", "dep:heed3"]
