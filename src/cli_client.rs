@@ -35,14 +35,22 @@ fn resolve_default_pack<'a>(reg: &'a Registry) -> Option<&'a RegistryPack> {
         return None;
     }
     if let Some(ref dp) = reg.default_path {
-        if let Some(pack) = reg.packs.iter().find(|p| p.local_path() == Some(dp.as_str())) {
+        if let Some(pack) = reg
+            .packs
+            .iter()
+            .find(|p| p.local_path() == Some(dp.as_str()))
+        {
             return Some(pack);
         }
     }
     if let Some(p) = reg.packs.iter().find(|p| p.default) {
         return Some(p);
     }
-    let locals: Vec<_> = reg.packs.iter().filter(|p| p.local_path().is_some()).collect();
+    let locals: Vec<_> = reg
+        .packs
+        .iter()
+        .filter(|p| p.local_path().is_some())
+        .collect();
     if locals.len() == 1 {
         return locals.first().copied();
     }
@@ -63,7 +71,12 @@ fn pack_bracket_inner(p: &RegistryPack, reg: &Registry, home_canon: &Option<Path
         == home_canon.as_ref();
     let is_default_pack = p.default
         || reg.default_path.as_deref() == p.local_path()
-        || reg.packs.iter().filter(|pack| pack.local_path().is_some()).count() == 1
+        || reg
+            .packs
+            .iter()
+            .filter(|pack| pack.local_path().is_some())
+            .count()
+            == 1
         || (path_is_home && reg.default_path.is_none());
     if is_default_pack {
         return "default".to_string();
@@ -132,7 +145,9 @@ impl MergedPackView {
 fn registry_pack_id(pack: &RegistryPack) -> Option<String> {
     let local_path = pack.local_path()?;
     let pack_dir = resolve_pack_dir(&PathBuf::from(local_path));
-    load_manifest(&pack_dir).ok().map(|manifest| manifest.pack_id)
+    load_manifest(&pack_dir)
+        .ok()
+        .map(|manifest| manifest.pack_id)
 }
 
 fn build_pack_views(reg: &Registry, cloud_packs: &[CloudPackSummary]) -> Vec<MergedPackView> {
@@ -164,8 +179,7 @@ fn build_pack_views(reg: &Registry, cloud_packs: &[CloudPackSummary]) -> Vec<Mer
         view.entry.local = true;
         view.entry.local_path = Some(local_path.to_string());
         view.entry.local_name = pack.name.clone();
-        view.entry.default =
-            pack.default || reg.default_path.as_deref() == Some(local_path);
+        view.entry.default = pack.default || reg.default_path.as_deref() == Some(local_path);
     }
 
     for summary in cloud_packs {
@@ -202,7 +216,10 @@ fn build_pack_views(reg: &Registry, cloud_packs: &[CloudPackSummary]) -> Vec<Mer
     views
 }
 
-fn resolve_default_pack_view<'a>(views: &'a [MergedPackView], reg: &Registry) -> Option<&'a MergedPackView> {
+fn resolve_default_pack_view<'a>(
+    views: &'a [MergedPackView],
+    reg: &Registry,
+) -> Option<&'a MergedPackView> {
     if let Some(ref default_path) = reg.default_path {
         if let Some(view) = views
             .iter()
@@ -343,22 +360,15 @@ fn cloud_request(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     let mut builder = req;
     if let Ok(cfg) = crate::config::load_config() {
         if let Some(auth) = cfg.auth {
-            if let Some(user_id) = auth.profile.user_id {
-                builder = builder.header("x-memkit-user-id", user_id.to_string());
-            }
-            if let Some(org_id) = auth.profile.org_id {
-                builder = builder.header("x-memkit-org-id", org_id.to_string());
-            }
-            if !auth.jwt.trim().is_empty() {
-                builder = builder.bearer_auth(auth.jwt);
+            if !auth.session_token.trim().is_empty() {
+                builder = builder.bearer_auth(auth.session_token);
             }
         }
     }
     builder
 }
 
-fn preferred_cloud_tenant(
-) -> Result<(crate::cloud::CloudTenantKind, String), anyhow::Error> {
+fn preferred_cloud_tenant() -> Result<(crate::cloud::CloudTenantKind, String), anyhow::Error> {
     let cfg = crate::config::load_config()?;
     let auth = cfg
         .auth
@@ -406,7 +416,9 @@ fn cloud_pack_id_conflict<'a>(
     cloud_packs: &'a [CloudPackSummary],
     pack_id: &str,
 ) -> Option<&'a CloudPackSummary> {
-    cloud_packs.iter().find(|summary| summary.pack_id == pack_id)
+    cloud_packs
+        .iter()
+        .find(|summary| summary.pack_id == pack_id)
 }
 
 fn default_cloud_pack_uri_for_id(pack_id: &str) -> Result<String> {
@@ -451,7 +463,9 @@ fn resolve_local_pack_path_by_id(pack_id: &str) -> Result<Option<String>> {
 
 fn resolve_local_query_pack(selector: &str) -> Result<Option<LocalQueryPack>> {
     if let Ok(path) = resolve_pack_by_name_or_path(selector) {
-        let pack_id = load_manifest(&resolve_pack_dir(&path)).ok().map(|m| m.pack_id);
+        let pack_id = load_manifest(&resolve_pack_dir(&path))
+            .ok()
+            .map(|m| m.pack_id);
         return Ok(Some(LocalQueryPack {
             path: path.to_string_lossy().to_string(),
             pack_id,
@@ -850,11 +864,7 @@ fn print_indexing_lines_from_job(c: bool, job: &Value, label: &str) -> bool {
 }
 
 /// Two-line stdout banner for `mk status` / `mk list` (replaces stderr `print_server_note_running` for those commands).
-async fn print_cli_list_banner(
-    cfg: &ServerConfig,
-    c: bool,
-    default_pack: Option<&MergedPackView>,
-) {
+async fn print_cli_list_banner(cfg: &ServerConfig, c: bool, default_pack: Option<&MergedPackView>) {
     let server_up = server_is_up(cfg).await;
     let url_inner = cfg.base_url();
     let server_prefix = term::bullet_green_word(c, server_up, "Server");
@@ -1128,7 +1138,8 @@ pub async fn list(cfg: &ServerConfig, output_json: bool, kind: ListOutputKind) -
     let cloud_packs = fetch_cloud_packs().await.unwrap_or_default();
     let views = build_pack_views(&reg, &cloud_packs);
     let default_pack = resolve_default_pack_view(&views, &reg);
-    let serialized_packs: Vec<PackListEntry> = views.iter().map(|view| view.entry.clone()).collect();
+    let serialized_packs: Vec<PackListEntry> =
+        views.iter().map(|view| view.entry.clone()).collect();
 
     if views.is_empty() {
         if !output_json {
@@ -1239,13 +1250,17 @@ pub async fn list(cfg: &ServerConfig, output_json: bool, kind: ListOutputKind) -
                                     .map(|jp| registry_job_pack_paths_match(pack_path_str, jp))
                                     .unwrap_or(false)
                         });
-                        show_removing = is_remove_for_active || queued_jobs.iter().any(remove_for_pack);
+                        show_removing =
+                            is_remove_for_active || queued_jobs.iter().any(remove_for_pack);
                     }
                     if show_removing {
                         if c {
                             println!(
                                 "    - {} {}",
-                                term::white_word(c, local_path_display.as_deref().unwrap_or(local_path)),
+                                term::white_word(
+                                    c,
+                                    local_path_display.as_deref().unwrap_or(local_path)
+                                ),
                                 term::warn_words(c, "removing...")
                             );
                         } else {
@@ -1263,7 +1278,8 @@ pub async fn list(cfg: &ServerConfig, output_json: bool, kind: ListOutputKind) -
                         .get("vector_count")
                         .and_then(Value::as_u64)
                         .unwrap_or(0) as usize;
-                    let entities = data.get("entities").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    let entities =
+                        data.get("entities").and_then(Value::as_u64).unwrap_or(0) as usize;
                     let relationships = data
                         .get("relationships")
                         .and_then(Value::as_u64)
@@ -1549,7 +1565,10 @@ pub async fn publish(
         .post(url)
         .header("x-memkit-pack-uri", &selected_pack_uri)
         .header("x-memkit-sha256", &prepared.sha256)
-        .header("x-memkit-overwrite", if overwrite { "true" } else { "false" })
+        .header(
+            "x-memkit-overwrite",
+            if overwrite { "true" } else { "false" },
+        )
         .body(body_bytes);
     if let Some(ref name) = registry_pack.name {
         request = request.header("x-memkit-pack-name", name);
@@ -1661,14 +1680,7 @@ mod tests {
         let root = unique_temp_dir("memkit-cli-pack-view");
         let pack_dir = root.join(".memkit");
         fs::create_dir_all(&root).expect("create root");
-        init_pack(
-            &pack_dir,
-            false,
-            "fastembed",
-            "BAAI/bge-small-en-v1.5",
-            384,
-        )
-        .expect("init pack");
+        init_pack(&pack_dir, false, "fastembed", "BAAI/bge-small-en-v1.5", 384).expect("init pack");
         let manifest = load_manifest(&pack_dir).expect("manifest");
         let cloud_uri = format!("memkit://users/user-1/packs/{}", manifest.pack_id);
         let reg = Registry {
@@ -1722,19 +1734,12 @@ mod tests {
             published_at: None,
         }];
 
-        let conflict = cloud_pack_id_conflict(
-            &packs,
-            "550e8400-e29b-41d4-a716-446655440000",
-        )
-        .expect("expected conflict");
+        let conflict = cloud_pack_id_conflict(&packs, "550e8400-e29b-41d4-a716-446655440000")
+            .expect("expected conflict");
         assert_eq!(
             conflict.pack_uri,
             "memkit://users/user-1/packs/550e8400-e29b-41d4-a716-446655440000"
         );
-        assert!(cloud_pack_id_conflict(
-            &packs,
-            "8ee56b36-8b2f-420e-a3f9-4014c01c8225"
-        )
-        .is_none());
+        assert!(cloud_pack_id_conflict(&packs, "8ee56b36-8b2f-420e-a3f9-4014c01c8225").is_none());
     }
 }

@@ -18,7 +18,7 @@ use tokio::sync::{Mutex, oneshot};
 use url::Url;
 use urlencoding::encode;
 
-use crate::config::{self, PersistedAuth};
+use crate::config::{self, AuthProfile, PersistedAuth};
 
 const JWT_FRESH_SKEW_SECS: i64 = 30;
 const CALLBACK_WAIT_TIMEOUT: StdDuration = StdDuration::from_secs(300);
@@ -49,6 +49,25 @@ enum BackendAuthError {
     Unauthorized(String),
     Other(anyhow::Error),
 }
+
+#[derive(Debug)]
+pub enum CloudSessionAuthError {
+    Unauthorized(String),
+    Misconfigured(String),
+    Backend(String),
+}
+
+impl std::fmt::Display for CloudSessionAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unauthorized(msg) => write!(f, "{msg}"),
+            Self::Misconfigured(msg) => write!(f, "{msg}"),
+            Self::Backend(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for CloudSessionAuthError {}
 
 impl std::fmt::Display for BackendAuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -215,6 +234,31 @@ pub fn whoami_response(state: &RuntimeAuthState) -> WhoAmIResponse {
             .as_ref()
             .map(|auth| auth.jwt_expires_at.clone()),
         refresh_error: state.refresh_error.clone(),
+    }
+}
+
+pub async fn authenticate_cloud_session(
+    session_token: &str,
+) -> Result<AuthProfile, CloudSessionAuthError> {
+    let token = session_token.trim();
+    if token.is_empty() {
+        return Err(CloudSessionAuthError::Unauthorized(
+            "cloud session token is required".to_string(),
+        ));
+    }
+
+    let target = resolve_auth_backend_target(None)
+        .map_err(|err| CloudSessionAuthError::Misconfigured(err.to_string()))?
+        .ok_or_else(|| {
+            CloudSessionAuthError::Misconfigured(
+                "cloud auth backend is not configured; set MEMKIT_AUTH_BASE_URL or MEMKIT_CONVEX_URL".to_string(),
+            )
+        })?;
+
+    match refresh_session(&target, token).await {
+        Ok(auth) => Ok(auth.profile),
+        Err(BackendAuthError::Unauthorized(msg)) => Err(CloudSessionAuthError::Unauthorized(msg)),
+        Err(BackendAuthError::Other(err)) => Err(CloudSessionAuthError::Backend(err.to_string())),
     }
 }
 
