@@ -71,8 +71,12 @@ pub fn build_cloud_publish_archive_with_pack_id(
     manifest_header.set_size(manifest_bytes.len() as u64);
     manifest_header.set_mode(0o644);
     manifest_header.set_cksum();
-    tar.append_data(&mut manifest_header, "manifest.json", manifest_bytes.as_slice())
-        .context("failed to append manifest.json")?;
+    tar.append_data(
+        &mut manifest_header,
+        "manifest.json",
+        manifest_bytes.as_slice(),
+    )
+    .context("failed to append manifest.json")?;
 
     let state_path = pack_dir.join("state").join("file_state.json");
     if state_path.exists() {
@@ -86,7 +90,9 @@ pub fn build_cloud_publish_archive_with_pack_id(
     let encoder = tar
         .into_inner()
         .context("failed to finalize publish tarball")?;
-    encoder.finish().context("failed to finish publish archive")?;
+    encoder
+        .finish()
+        .context("failed to finish publish archive")?;
 
     let (sha256, _) = sha256_for_path(&archive_path)?;
     Ok(PreparedPublishArchive {
@@ -101,7 +107,10 @@ pub fn unpack_cloud_publish_archive(
     revision_root: &Path,
 ) -> Result<UnpackedPublishArtifact> {
     if revision_root.exists() {
-        bail!("revision directory already exists: {}", revision_root.display());
+        bail!(
+            "revision directory already exists: {}",
+            revision_root.display()
+        );
     }
     fs::create_dir_all(revision_root)
         .with_context(|| format!("failed to create {}", revision_root.display()))?;
@@ -140,7 +149,8 @@ pub fn unpack_cloud_publish_archive(
 }
 
 pub fn sha256_for_path(path: &Path) -> Result<(String, u64)> {
-    let file = fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let metadata = file
         .metadata()
         .with_context(|| format!("failed to stat {}", path.display()))?;
@@ -239,12 +249,9 @@ mod tests {
 
         let override_pack_id = uuid::Uuid::new_v4().to_string();
         let scratch = root.join("scratch");
-        let prepared = build_cloud_publish_archive_with_pack_id(
-            &pack_dir,
-            &scratch,
-            Some(&override_pack_id),
-        )
-        .expect("build archive");
+        let prepared =
+            build_cloud_publish_archive_with_pack_id(&pack_dir, &scratch, Some(&override_pack_id))
+                .expect("build archive");
         assert_eq!(prepared.manifest.pack_id, override_pack_id);
         assert_eq!(
             load_manifest(&pack_dir).expect("reload manifest").pack_id,

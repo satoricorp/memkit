@@ -305,9 +305,12 @@ fn extract_memory_candidates(
     session_time: Option<DateTime<Utc>>,
 ) -> Result<Vec<MemoryRecordCandidate>> {
     match backend {
-        MemoryExtractionBackend::Rules => Ok(extract_memory_candidates_rules(&window.extraction_text)),
+        MemoryExtractionBackend::Rules => {
+            Ok(extract_memory_candidates_rules(&window.extraction_text))
+        }
         MemoryExtractionBackend::Llama => {
-            let candidates = extract_memory_candidates_llama(extraction_model, window, session_time)?;
+            let candidates =
+                extract_memory_candidates_llama(extraction_model, window, session_time)?;
             if candidates.is_empty() {
                 log_llm_extraction_abstention("llama", window);
             }
@@ -472,8 +475,8 @@ fn normalize_identity_change_memories(text: &str) -> Vec<MemoryRecordCandidate> 
     let lower = text.to_ascii_lowercase();
     let mut out = Vec::new();
 
-    let from_change = extract_after_phrase(text, &lower, "changed my last name from ")
-        .and_then(|rest| {
+    let from_change =
+        extract_after_phrase(text, &lower, "changed my last name from ").and_then(|rest| {
             split_once_case_preserving(&rest, " to ")
                 .map(|(old, new)| (old.to_string(), new.to_string()))
         });
@@ -536,9 +539,15 @@ fn normalize_identity_change_memories(text: &str) -> Vec<MemoryRecordCandidate> 
 
 fn normalize_activity_location_memory(text: &str) -> Option<MemoryRecordCandidate> {
     let lower = text.to_ascii_lowercase();
-    if ["bought", "purchased", "picked up", "got from", "ordered from"]
-        .iter()
-        .any(|token| lower.contains(token))
+    if [
+        "bought",
+        "purchased",
+        "picked up",
+        "got from",
+        "ordered from",
+    ]
+    .iter()
+    .any(|token| lower.contains(token))
     {
         return None;
     }
@@ -551,9 +560,17 @@ fn normalize_activity_location_memory(text: &str) -> Option<MemoryRecordCandidat
         Some(format!("User takes yoga classes at {}.", place))
     } else if lower.contains("work") && !lower.contains("workshop") {
         Some(format!("User works at {}.", place))
-    } else if ["study", "school", "college", "university", "class", "classes", "lesson"]
-        .iter()
-        .any(|token| lower.contains(token))
+    } else if [
+        "study",
+        "school",
+        "college",
+        "university",
+        "class",
+        "classes",
+        "lesson",
+    ]
+    .iter()
+    .any(|token| lower.contains(token))
     {
         Some(format!("User studies at {}.", place))
     } else if ["train", "training", "gym", "practice", "practices"]
@@ -1032,7 +1049,10 @@ fn extract_changed_to_value(text: &str, lower: &str) -> Option<(String, String)>
 fn split_once_case_preserving<'a>(text: &'a str, needle: &str) -> Option<(&'a str, &'a str)> {
     let lower = text.to_ascii_lowercase();
     let idx = lower.find(needle)?;
-    Some((text.get(..idx)?.trim(), text.get(idx + needle.len()..)?.trim()))
+    Some((
+        text.get(..idx)?.trim(),
+        text.get(idx + needle.len()..)?.trim(),
+    ))
 }
 
 fn clean_subject_phrase(value: &str) -> String {
@@ -1076,9 +1096,17 @@ fn strip_leading_phrase_case_insensitive<'a>(text: &'a str, prefix: &str) -> &'a
 
 fn infer_entity_kind(entity: &str) -> &'static str {
     let lower = entity.to_ascii_lowercase();
-    if ["bedroom", "kitchen", "bathroom", "living room", "wall", "walls", "room"]
-        .iter()
-        .any(|token| lower.contains(token))
+    if [
+        "bedroom",
+        "kitchen",
+        "bathroom",
+        "living room",
+        "wall",
+        "walls",
+        "room",
+    ]
+    .iter()
+    .any(|token| lower.contains(token))
     {
         "room"
     } else if ["playlist", "account", "profile", "project", "document"]
@@ -1120,23 +1148,8 @@ fn looks_like_named_value(value: &str) -> bool {
 fn looks_like_color_value(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     [
-        "gray",
-        "grey",
-        "blue",
-        "green",
-        "red",
-        "yellow",
-        "white",
-        "black",
-        "pink",
-        "purple",
-        "brown",
-        "orange",
-        "beige",
-        "tan",
-        "shade",
-        "lighter",
-        "darker",
+        "gray", "grey", "blue", "green", "red", "yellow", "white", "black", "pink", "purple",
+        "brown", "orange", "beige", "tan", "shade", "lighter", "darker",
     ]
     .iter()
     .any(|token| lower.contains(token))
@@ -1405,7 +1418,8 @@ fn extract_memory_candidates_openai(
         let status = res.status();
         let text = res.text().context("read OpenAI extraction response body")?;
         if status.is_success() {
-            let json: Value = serde_json::from_str(&text).context("parse OpenAI extraction json")?;
+            let json: Value =
+                serde_json::from_str(&text).context("parse OpenAI extraction json")?;
             let content = json
                 .get("choices")
                 .and_then(|c| c.get(0))
@@ -1459,7 +1473,11 @@ fn parse_memory_candidates_json(input: &str) -> Result<Vec<MemoryRecordCandidate
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("conversation extraction JSON missing memories[]"))?,
         Value::Array(items) => items,
-        _ => return Err(anyhow!("conversation extraction JSON must be an object or array")),
+        _ => {
+            return Err(anyhow!(
+                "conversation extraction JSON must be an object or array"
+            ));
+        }
     };
     let mut out = Vec::new();
     for memory in memories.iter().take(MAX_MEMORYS_PER_WINDOW) {
@@ -1553,7 +1571,7 @@ fn strip_json_fences(input: &str) -> String {
 }
 
 fn extract_json_snippet(input: &str) -> Option<String> {
-    let candidates = [('[' , ']'), ('{' , '}')];
+    let candidates = [('[', ']'), ('{', '}')];
     for (open, close) in candidates {
         if let Some(start) = input.find(open) {
             if let Some(end) = input.rfind(close) {
@@ -1633,8 +1651,7 @@ Heuristic suggestions:\n\
 {}\n\n\
 The suggestions above are noisy hints, not ground truth. Use them only if they are fully supported by the conversation window. You may refine them, split them into smaller memories, or discard them completely. When one of them is clearly supported, return the refined memory instead of abstaining.\n\n\
 Conversation window:\n{}\n",
-        heuristic_hints,
-        structured_window
+        heuristic_hints, structured_window
     )
 }
 
@@ -1655,7 +1672,8 @@ fn memory_extraction_hint_block(window_text: &str) -> String {
         return "- none".to_string();
     }
 
-    hints.into_iter()
+    hints
+        .into_iter()
         .take(3)
         .map(|candidate| {
             format!(
@@ -1806,8 +1824,7 @@ fn infer_relation_kind_from_text(lower: &str) -> Option<&'static str> {
         Some("brand_model")
     } else if lower.contains("breed") {
         Some("breed_type")
-    } else if lower.contains("job") || lower.contains("occupation") || lower.contains("worked as")
-    {
+    } else if lower.contains("job") || lower.contains("occupation") || lower.contains("worked as") {
         Some("occupation_role")
     } else if lower.contains("count") || lower.contains("total") || lower.contains("number of") {
         Some("count_fact")
@@ -2000,7 +2017,10 @@ fn build_turn_windows(turns: &[ConversationTurn]) -> Vec<TurnWindow> {
 
 fn should_extract_window_with_llm(window: &TurnWindow) -> bool {
     let text = window.extraction_text.trim();
-    if text.len() < 18 || looks_like_generic_filler(text) || looks_like_nonmemory_request_or_reaction(text) {
+    if text.len() < 18
+        || looks_like_generic_filler(text)
+        || looks_like_nonmemory_request_or_reaction(text)
+    {
         return false;
     }
     if window.primary_role != "user" && window.primary_role != "assistant" {
@@ -2572,9 +2592,9 @@ fn shift_relative(
 #[cfg(test)]
 mod tests {
     use super::{
-        ConversationSessionInput, ConversationTurn, build_conversation_docs,
-        expand_query_variants, extract_temporal_metadata, fallback_memory_candidate,
-        parse_session_time, query_time_analysis,
+        ConversationSessionInput, ConversationTurn, build_conversation_docs, expand_query_variants,
+        extract_temporal_metadata, fallback_memory_candidate, parse_session_time,
+        query_time_analysis,
     };
 
     #[test]
@@ -2664,8 +2684,7 @@ mod tests {
                 .any(|v| v == "User takes yoga classes at")
         );
 
-        let purchase_variants =
-            expand_query_variants("Where did I buy my new tennis racket from?");
+        let purchase_variants = expand_query_variants("Where did I buy my new tennis racket from?");
         assert!(
             purchase_variants
                 .iter()
@@ -2748,10 +2767,7 @@ mod tests {
                 session_time: Some("2025-03-31".to_string()),
                 conversation: vec![ConversationTurn {
                     role: "user".to_string(),
-                    content: format!(
-                        "I graduated with a degree in {}",
-                        "A".repeat(5000)
-                    ),
+                    content: format!("I graduated with a degree in {}", "A".repeat(5000)),
                 }],
             }],
             "rules",
@@ -2834,10 +2850,8 @@ mod tests {
         .expect("conversation docs");
 
         assert!(
-            docs[0]
-                .docs
-                .iter()
-                .all(|doc| doc.content != "User attended a production of at the local community theater.")
+            docs[0].docs.iter().all(|doc| doc.content
+                != "User attended a production of at the local community theater.")
         );
     }
 
@@ -2894,14 +2908,18 @@ mod tests {
         )
         .expect("conversation docs");
 
-        assert!(docs[0]
-            .docs
-            .iter()
-            .any(|doc| doc.content == "User's previous last name was Johnson."));
-        assert!(docs[0]
-            .docs
-            .iter()
-            .any(|doc| doc.content == "User's current last name is Winters."));
+        assert!(
+            docs[0]
+                .docs
+                .iter()
+                .any(|doc| doc.content == "User's previous last name was Johnson.")
+        );
+        assert!(
+            docs[0]
+                .docs
+                .iter()
+                .any(|doc| doc.content == "User's current last name is Winters.")
+        );
     }
 
     #[test]
@@ -2920,10 +2938,12 @@ mod tests {
         )
         .expect("conversation docs");
 
-        assert!(docs[0]
-            .docs
-            .iter()
-            .any(|doc| doc.content == "User takes yoga classes at Serenity Yoga."));
+        assert!(
+            docs[0]
+                .docs
+                .iter()
+                .any(|doc| doc.content == "User takes yoga classes at Serenity Yoga.")
+        );
     }
 
     #[test]
@@ -2980,10 +3000,8 @@ mod tests {
             .map(|doc| doc.content.as_str())
             .collect::<Vec<_>>();
         assert!(
-            contents.iter().any(
-                |content| *content
-                    == "User bought a new tennis racket from the sports store downtown."
-            ),
+            contents.iter().any(|content| *content
+                == "User bought a new tennis racket from the sports store downtown."),
             "contents: {:?}",
             contents
         );

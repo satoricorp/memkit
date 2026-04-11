@@ -48,9 +48,7 @@ impl CloudPackUri {
             .ok_or_else(|| anyhow!("cloud pack uri must start with {}", MEMKIT_URI_SCHEME))?;
         let parts: Vec<&str> = path.split('/').collect();
         if parts.len() != 4 || parts[2] != "packs" {
-            bail!(
-                "cloud pack uri must look like memkit://users/<tenant_id>/packs/<pack_id>"
-            );
+            bail!("cloud pack uri must look like memkit://users/<tenant_id>/packs/<pack_id>");
         }
         let tenant_kind = CloudTenantKind::parse(parts[0])?;
         let tenant_id = parts[1].trim();
@@ -197,8 +195,12 @@ where
 }
 
 pub fn ensure_cloud_pack_dirs(uri: &CloudPackUri, cloud_root: &Path) -> Result<()> {
-    fs::create_dir_all(uri.revisions_root(cloud_root))
-        .with_context(|| format!("failed to create {}", uri.revisions_root(cloud_root).display()))
+    fs::create_dir_all(uri.revisions_root(cloud_root)).with_context(|| {
+        format!(
+            "failed to create {}",
+            uri.revisions_root(cloud_root).display()
+        )
+    })
 }
 
 pub fn read_pack_metadata(uri: &CloudPackUri, cloud_root: &Path) -> Result<CloudPackMetadata> {
@@ -219,7 +221,9 @@ pub fn summarize_cloud_pack(uri: &CloudPackUri, cloud_root: &Path) -> Result<Clo
         tenant_id: metadata.tenant_id,
         display_name: metadata.display_name,
         source_pack_id: metadata.source_pack_id,
-        current_revision: metadata.current_revision.or_else(|| current.as_ref().map(|c| c.revision.clone())),
+        current_revision: metadata
+            .current_revision
+            .or_else(|| current.as_ref().map(|c| c.revision.clone())),
         published_at: current.map(|c| c.published_at),
     })
 }

@@ -245,8 +245,11 @@ pub fn ensure_default_if_unset() -> Result<()> {
     } else {
         None
     };
-    let path_to_set =
-        default_path.or_else(|| local_packs(&reg).next().and_then(|p| p.local_path().map(str::to_string)));
+    let path_to_set = default_path.or_else(|| {
+        local_packs(&reg)
+            .next()
+            .and_then(|p| p.local_path().map(str::to_string))
+    });
     if let Some(ref path) = path_to_set {
         reg.default_path = Some(path.clone());
         for p in &mut reg.packs {
@@ -399,9 +402,7 @@ pub fn resolve_registry_pack(arg: Option<&str>) -> Result<RegistryPack> {
         }
         let reg = load_registry().unwrap_or_default();
         if let Some(pack) = reg.packs.iter().find(|p| {
-            p.name.as_deref() == Some(raw)
-                || p.local_path() == Some(raw)
-                || p.path == raw
+            p.name.as_deref() == Some(raw) || p.local_path() == Some(raw) || p.path == raw
         }) {
             return Ok(pack.clone());
         }

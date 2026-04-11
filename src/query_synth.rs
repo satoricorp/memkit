@@ -13,8 +13,7 @@ pub enum QueryProvider {
     OpenAI(String),
 }
 
-impl QueryProvider {
-}
+impl QueryProvider {}
 
 fn synthesis_max_tokens() -> usize {
     std::env::var("MEMKIT_LLM_MAX_TOKENS")

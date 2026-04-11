@@ -429,17 +429,20 @@ fn input_json_schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                 "required": ["query"],
                 "additionalProperties": false
             }),
-            vec![json!({
-                "query": "how does auth work",
-                "top_k": 12,
-                "use_reranker": false,
-                "raw": true,
-                "pack": "./memory-pack"
-            }), json!({
-                "query": "what changed?",
-                "pack": "pack-id-123",
-                "cloud": true
-            })],
+            vec![
+                json!({
+                    "query": "how does auth work",
+                    "top_k": 12,
+                    "use_reranker": false,
+                    "raw": true,
+                    "pack": "./memory-pack"
+                }),
+                json!({
+                    "query": "what changed?",
+                    "pack": "pack-id-123",
+                    "cloud": true
+                }),
+            ],
         ),
         "publish" => json_schema_attach_examples(
             json!({
@@ -456,14 +459,17 @@ fn input_json_schema_for_command(cmd: &str) -> Option<serde_json::Value> {
                     "overwrite": { "type": "boolean" }
                 }
             }),
-            vec![json!({
-                "pack": "./memory-pack",
-                "pack_uri": "memkit://users/123/packs/pack-abc",
-                "overwrite": true
-            }), json!({
-                "pack": "./memory-pack",
-                "cloud_pack_id": "550e8400-e29b-41d4-a716-446655440000"
-            })],
+            vec![
+                json!({
+                    "pack": "./memory-pack",
+                    "pack_uri": "memkit://users/123/packs/pack-abc",
+                    "overwrite": true
+                }),
+                json!({
+                    "pack": "./memory-pack",
+                    "cloud_pack_id": "550e8400-e29b-41d4-a716-446655440000"
+                }),
+            ],
         ),
         "login" => json_schema_attach_examples(
             json!({

@@ -128,7 +128,9 @@ fn main() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&git_shim).expect("git shim metadata").permissions();
+        let mut perms = fs::metadata(&git_shim)
+            .expect("git shim metadata")
+            .permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&git_shim, perms).expect("chmod git shim");
     }

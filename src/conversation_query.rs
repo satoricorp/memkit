@@ -76,15 +76,7 @@ fn infer_query_shape(lower: &str) -> (Option<String>, Option<String>) {
     }
     if lower.contains("where")
         && [
-            "take",
-            "takes",
-            "practice",
-            "attend",
-            "train",
-            "study",
-            "work",
-            "shop",
-            "class",
+            "take", "takes", "practice", "attend", "train", "study", "work", "shop", "class",
             "classes",
         ]
         .iter()

@@ -69,7 +69,12 @@ pub fn run_add(pack_dir: &Path, content: &str, source_path: &str) -> Result<usiz
         return Ok(0);
     }
 
-    persist_docs(pack_dir, manifest.embedding.dimension, manifest.graph.enabled, &new_docs)?;
+    persist_docs(
+        pack_dir,
+        manifest.embedding.dimension,
+        manifest.graph.enabled,
+        &new_docs,
+    )?;
     Ok(new_docs.len())
 }
 
@@ -81,7 +86,9 @@ pub fn run_add_conversations(
     let extraction_provider = std::env::var("MEMKIT_CONVERSATION_PROVIDER")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| normalize_runtime_conversation_provider(&manifest.conversation.extraction_provider));
+        .unwrap_or_else(|| {
+            normalize_runtime_conversation_provider(&manifest.conversation.extraction_provider)
+        });
     let extraction_model = conversation_extraction_model(&extraction_provider);
     let indexed = build_conversation_docs(sessions, &extraction_provider, &extraction_model)?;
     let mut provider = create_embed_provider(
@@ -109,7 +116,12 @@ pub fn run_add_conversations(
                 doc.embedding = embedding;
             }
         }
-        persist_docs(pack_dir, manifest.embedding.dimension, manifest.graph.enabled, &docs)?;
+        persist_docs(
+            pack_dir,
+            manifest.embedding.dimension,
+            manifest.graph.enabled,
+            &docs,
+        )?;
         total_docs += docs.len();
     }
 
@@ -152,7 +164,12 @@ fn create_embed_provider(
     })
 }
 
-fn persist_docs(pack_dir: &Path, dim: usize, graph_enabled_by_manifest: bool, new_docs: &[SourceDoc]) -> Result<()> {
+fn persist_docs(
+    pack_dir: &Path,
+    dim: usize,
+    graph_enabled_by_manifest: bool,
+    new_docs: &[SourceDoc],
+) -> Result<()> {
     let path = helix_pack_path_for_local(pack_dir);
     helix_append_chunks(&path, new_docs, dim).context("failed to append to helix")?;
     let graph_enabled = crate::config::resolve_graph_enabled(graph_enabled_by_manifest);
