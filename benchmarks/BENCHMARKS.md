@@ -1,129 +1,82 @@
-# Satori Benchmarks
+# Benchmarks
 
-> Legacy doc note: benchmark text below still references `satori` and older architecture assumptions.
-> Current CLI binary is `mk`; current defaults and APIs are in `README.md`.
+This directory is intentionally small.
 
-## Context
+The current benchmark baseline is:
 
-Satori indexes **documents** (files, markdown, code) into a memory pack, but the primary use case is **conversational and multi-turn**: users query memory through the CLI (`satori query`) and, more commonly, through the **SDK** when integrating with AI clients. Each query in a conversation may depend on prior turns; benchmarks must reflect this retrieval-in-conversation reality.
+- `run_longmemeval_benchmark.ts` for LongMemEval indexing + QA runs
+- `summarize_longmemeval_misses.py` for miss clustering
+- `download_data.ts` for fetching benchmark data when needed
 
----
+The current benchmark path uses an **LLM extractor**:
 
-## Spec Criteria to Build Benchmarks
+- `MEMKIT_CONVERSATION_PROVIDER=openai` when `OPENAI_API_KEY` is set
+- otherwise `MEMKIT_CONVERSATION_PROVIDER=llama`
+- `EMBED_PROVIDER=fastembed`
+- reranker as an explicit on/off ablation
 
-The following criteria from existing specs must be met or supported to implement the benchmark suite.
+Heuristics live in the extraction prompt and validation layer. The extractor should not silently fall back to rule-based memory creation.
 
-### From PRD (specs/legacy/prd-v1-local-memory.md)
+## Generated Directories
 
-| Criterion | Target | Benchmark Relevance |
-|-----------|--------|---------------------|
-| Warm query latency (vector-only) | P95 ≤ 300 ms | Primary latency benchmark gate |
-| Warm query latency (hybrid) | P95 ≤ 450 ms | Hybrid mode latency benchmark |
-| Incremental reindex (single file ≤ 1 MB) | ≤ 5 s | Indexing throughput benchmark |
-| Idle daemon memory | ≤ 500 MB | Resource envelope benchmark |
-| Active indexing memory | ≤ 2.5 GB | Resource envelope benchmark |
-| Baseline hardware | MacBook Pro class | Reference machine for all benchmarks |
+These paths are generated and ignored:
 
-### From Validation Plan (specs/legacy/validation-plan-v1.md)
+- `benchmarks/data/`
+- `benchmarks/node_modules/`
+- `benchmarks/output/`
 
-| Criterion | Target | Benchmark Relevance |
-|-----------|--------|---------------------|
-| Test dataset profiles | Small (1k), Medium (25k), Large (100k) chunks | Dataset sizes for latency and recall |
-| Dataset content | Mixed markdown, code, plain text with known answer keys | Recall evaluation ground truth |
-| 100-cycle ingest/update/query/reopen loop | No crashes, no corruption | Stability benchmark |
-| P50/P95 warm query latency | Vector and hybrid | Latency benchmark metrics |
-| Deterministic ordering | Hybrid retrieval | Reproducibility requirement |
+If `benchmarks/data/` is missing, download it again:
 
-### From Architecture (specs/legacy/architecture-v1.md)
+```bash
+bun run download
+```
 
-| Criterion | Target | Benchmark Relevance |
-|-----------|--------|---------------------|
-| Query pipeline stages | Embed → Retrieve (Helix hybrid) → Rerank | Per-stage timing breakdown |
-| Retrieval strategy | Hybrid (vector + FTS) with citation-first output | Recall and ranking evaluation |
+## Canonical Commands
 
----
+20-question stable baseline without reranking:
 
-## Benchmark Categories
+```bash
+bun run run:20
+```
 
-### 1. Latency Benchmarks
+20-question stable baseline with reranking:
 
-**Purpose:** Measure query speed for conversational use (CLI and SDK).
+```bash
+bun run run:20:rerank
+```
 
-**Spec criteria:**
-- P95 vector-only ≤ 300 ms
-- P95 hybrid ≤ 450 ms
-- Per-stage timings: embed, retrieval, rerank, total
+Generic run using the canonical runner:
 
-**Requirements to build:**
-- Criterion-based `cargo bench` harness
-- Warm-up queries before measurement (avoid cold-start bias)
-- Dataset profiles: 1k, 25k, 100k chunks
-- Both vector and hybrid modes
+```bash
+MAX_QUESTIONS=50 USE_RERANKER=0 bun run run_longmemeval_benchmark.ts
+```
 
-### 2. Recall Benchmarks
+Summarize misses for a saved run:
 
-**Purpose:** Measure retrieval quality for multi-turn conversations where context must be found across indexed documents.
+```bash
+python3 summarize_longmemeval_misses.py output/<file>.jsonl
+```
 
-**Spec criteria:**
-- Known answer keys (validation plan)
-- Deterministic ranking for reproducibility
+## Output Expectations
 
-**Requirements to build:**
-- Synthetic dataset with query → relevant chunk mappings
-- Metrics: Hit@1, Hit@5, Hit@10, MRR
-- Script: index dataset → run query suite → compute recall
+Each run writes:
 
-### 3. Conversational / Multi-Turn Benchmarks
+- a JSONL predictions file in `benchmarks/output/`
+- a matching log file in `benchmarks/output/`
 
-**Purpose:** Evaluate retrieval in conversation-like scenarios (LoCoMo, LongMemEval).
+The canonical runner logs:
 
-**Spec criteria:**
-- Document indexing flow (unchanged)
-- Query interface: CLI and SDK contract
+- pack path
+- reranker mode
+- embedding config
+- conversation extraction provider
+- indexing elapsed time
+- query elapsed time
 
-**Requirements to build:**
-- Adapter to index conversation histories as documents (turns or sessions as chunks)
-- Adapter to run benchmark QA queries against indexed pack
-- Alignment with external benchmark formats (LoCoMo, LongMemEval) for comparability
+## Workflow
 
-### 4. Stability and Resource Benchmarks
-
-**Purpose:** Validate daemon behavior under sustained conversational load.
-
-**Spec criteria:**
-- 24h watch-mode soak with periodic queries
-- Idle memory ≤ 500 MB, active indexing ≤ 2.5 GB
-- 100-cycle ingest/update/query/reopen loop
-
-**Requirements to build:**
-- Soak test harness with configurable duration and query rate
-- Memory/CPU sampling during run
-
----
-
-## Interface Requirements
-
-Benchmarks must exercise the same interfaces used in production:
-
-1. **CLI:** `satori query "<query>" [--mode vector|hybrid] [--top-k N]`
-2. **HTTP API:** `POST /query` with `query`, `mode`, `top_k`
-3. **SDK (future):** Programmatic query API—benchmarks should be designed so SDK clients can reuse the same query contract and dataset.
-
----
-
-## Profiling the query pipeline
-
-Use `mk query` with `--output json` and inspect server logs / response `timings_ms` where exposed. For embed + rerank hot paths, profile a release build (`cargo build --release`) with your platform sampler (e.g. Instruments on macOS, `perf` on Linux) while running repeated queries against a fixed pack. Watch for duplicate embedding work between retrieve and rerank stages in `src/query.rs` / `src/rerank.rs`.
-
----
-
-## Pre-Build Checklist
-
-Before implementing benchmark scripts and harnesses:
-
-- [ ] Dataset profiles (1k, 25k, 100k chunks) defined and obtainable
-- [ ] Known answer keys or ground-truth mappings for recall
-- [ ] Reference hardware documented (MacBook Pro class)
-- [ ] PRD latency gates (300 ms / 450 ms) agreed as pass/fail
-- [ ] CLI and API query contract stable
-- [ ] Per-stage timing (`embed`, `retrieval`, `rerank`, `total`) exposed and consumable by benchmarks
+1. Start `memkit-server`.
+2. Run the canonical benchmark script with a fresh pack.
+3. Compare the no-rerank and rerank arms on the same question count.
+4. Run the miss summarizer on the winning arm.
+5. Choose one next improvement wave from the dominant miss class.

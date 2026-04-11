@@ -10,6 +10,9 @@
 /.local-run
 /.local-data
 /node_modules
+/benchmarks/node_modules
+/benchmarks/output
+/benchmarks/data
 .env
 .cursor
 .local-runtime
